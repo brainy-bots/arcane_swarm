@@ -76,7 +76,7 @@ All runs use the same workload so that SpacetimeDB-only and Arcane+SpacetimeDB r
 
 ### 3.2 Harness and Scripts
 
-The experiment harness (swarm binary, cluster binaries, manager, and orchestration scripts) lives in the **arcane-demos** repository. This repository documents the experiment, the canonical parameters, and the reported results. Reproducibility instructions (how to run the same sweeps) are given in Section 6.
+This repository is self-contained: it includes the **orchestration scripts** (`scripts/swarm/Run-ArcaneScalingSweep.ps1`, `Run-SpacetimeDBCeilingSweep.ps1`) and uses the **arcane** and **arcane-demos** repositories as Git submodules for the binaries and SpacetimeDB module. Clone with `--recurse-submodules` (or run `git submodule update --init --recursive`) so that the scripts can build and run the swarm, manager, and cluster processes. Step-by-step reproducibility is in [REPRODUCIBILITY.md](REPRODUCIBILITY.md).
 
 ### 3.3 Single-Machine Constraint
 
@@ -187,12 +187,17 @@ Capping the number of entities per SpacetimeDB HTTP request (e.g. 500) was inten
 
 ## 6. Reproducibility
 
-- **Canonical parameters** are fixed in the arcane-demos harness and documented in `arcane-demos/docs/CANONICAL_BENCHMARK_PARAMS.md`.
-- **SpacetimeDB-only ceiling sweep:** Script `Run-SpacetimeDBCeilingSweep.ps1` in `arcane-demos/scripts/swarm/`.
-- **Arcane+SpacetimeDB scaling sweep:** Script `Run-ArcaneScalingSweep.ps1` in the same directory. Use `-PersistBatchSize 0` for no batch cap (recommended for ceiling runs). Prerequisites: Redis and SpacetimeDB running locally; Arcane and arcane-demos built (manager, cluster-demo, swarm binaries).
-- **Outputs:** CSV and logs are written under the script directory; each run prints the canonical parameter block and pass/fail.
+Full step-by-step instructions are in **[REPRODUCIBILITY.md](REPRODUCIBILITY.md)**. Summary:
 
-This repository does not contain the harness or scripts; it documents the experiment and findings. The implementation lives in the **arcane-demos** (and **Arcane**) repositories.
+1. **Prerequisites:** Rust, Redis (`redis://127.0.0.1:6379`), SpacetimeDB CLI, PowerShell. Start Redis and run `spacetime start` in a separate terminal.
+2. **Clone:** `git clone --recurse-submodules https://github.com/martinjms/arcane-scaling-benchmarks.git` (or clone then `git submodule update --init --recursive`).
+3. **SpacetimeDB-only ceiling:** From repo root,  
+   `.\scripts\swarm\Run-SpacetimeDBCeilingSweep.ps1 -FindCeiling -Step 250 -MaxPlayers 2000`  
+   (optionally `-NoPublish` if the module is already published).
+4. **Arcane+SpacetimeDB scaling:**  
+   `.\scripts\swarm\Run-ArcaneScalingSweep.ps1 -NumServers 2 -PlayersTotal 1000`  
+   Default is no persist batch cap (`-PersistBatchSize 0`); use that for the reported ceilings.
+5. **Outputs:** CSV and logs under `scripts/swarm/` (e.g. `arcane_scaling_sweep.csv`, `spacetimedb_ceiling_sweep.csv`, `arcane_scaling_logs/`). Canonical parameters are in [docs/CANONICAL_PARAMETERS.md](docs/CANONICAL_PARAMETERS.md).
 
 ---
 
