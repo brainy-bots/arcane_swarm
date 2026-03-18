@@ -34,7 +34,16 @@ param(
     [int] $StartPlayers = 1000,
     [int] $StepPlayers = 250,
     [int] $MaxPlayers = 6000,
-    [int] $DurationSeconds = 30,
+    # Measurement window per increment (after RESET, before REPORT)
+    [int] $IncrementWindowSeconds = 30,
+    # Extra sleep after REPORT before applying the next SET_PLAYERS
+    [int] $BetweenIncrementsSeconds = 1,
+
+    # Canonical workload parameters (exposed for reproducibility / iteration)
+    [int] $TickRateHz = 10,
+    [double] $ActionsPerSec = 2,
+    [double] $ReadRateHz = 5,
+    [string] $SwarmMode = "spread",
 
     [double] $MaxErrRate = 0.01,
     [double] $MaxLatencyMs = 200,
@@ -42,6 +51,7 @@ param(
     # Arcane scenarios
     [int[]] $ArcaneClusterCounts = @(1,2,3,4,5,10),
     [int] $PersistBatchSize = 0,
+    [int] $SpacetimePersistHz = 1,
 
     # Output
     [string] $OutDir = ""
@@ -189,10 +199,10 @@ function Run-Scenario-SpacetimeOnly {
             "--server-physics",
             "--players",$ScenarioStartPlayers,
             "--max-players",$ScenarioMaxPlayers,
-            "--tick-rate","10",
-            "--aps","2",
-            "--mode","spread",
-            "--read-rate","5",
+            "--tick-rate",$TickRateHz,
+            "--aps",$ActionsPerSec,
+            "--mode",$SwarmMode,
+            "--read-rate",$ReadRateHz,
             "--duration","0",
             "--run-forever",
             "--control-port",$ControlPort,
@@ -208,10 +218,10 @@ function Run-Scenario-SpacetimeOnly {
             Send-SwarmCommand -Port $ControlPort -Line "SET_PLAYERS $players"
             Start-Sleep -Seconds 2
             Send-SwarmCommand -Port $ControlPort -Line "RESET"
-            Start-Sleep -Seconds $DurationSeconds
+            Start-Sleep -Seconds $IncrementWindowSeconds
             Send-SwarmCommand -Port $ControlPort -Line "REPORT"
 
-            Start-Sleep -Seconds 1
+            Start-Sleep -Seconds $BetweenIncrementsSeconds
             $txt = ""
             if (Test-Path $stderr) { $txt = Get-Content -Path $stderr -Raw -ErrorAction SilentlyContinue }
             $parsed = Parse-SwarmFinal $txt
@@ -276,7 +286,7 @@ function Run-Scenario-Arcane {
     $env:SPACETIMEDB_PERSIST = "1"
     $env:SPACETIMEDB_URI = $SpacetimeHost
     $env:SPACETIMEDB_DATABASE = $DatabaseName
-    $env:SPACETIMEDB_PERSIST_HZ = "1"
+    $env:SPACETIMEDB_PERSIST_HZ = $SpacetimePersistHz.ToString()
     $env:SPACETIMEDB_PERSIST_BATCH_SIZE = $PersistBatchSize.ToString()
 
     for ($i=0; $i -lt $NumServers; $i++) {
@@ -309,10 +319,10 @@ function Run-Scenario-Arcane {
             "--backend","arcane",
             "--players",$ScenarioStartPlayers,
             "--max-players",$ScenarioMaxPlayers,
-            "--tick-rate","10",
-            "--aps","2",
-            "--mode","spread",
-            "--read-rate","5",
+            "--tick-rate",$TickRateHz,
+            "--aps",$ActionsPerSec,
+            "--mode",$SwarmMode,
+            "--read-rate",$ReadRateHz,
             "--duration","0",
             "--run-forever",
             "--control-port",$ControlPort,
@@ -329,10 +339,10 @@ function Run-Scenario-Arcane {
             Send-SwarmCommand -Port $ControlPort -Line "SET_PLAYERS $players"
             Start-Sleep -Seconds 2
             Send-SwarmCommand -Port $ControlPort -Line "RESET"
-            Start-Sleep -Seconds $DurationSeconds
+            Start-Sleep -Seconds $IncrementWindowSeconds
             Send-SwarmCommand -Port $ControlPort -Line "REPORT"
 
-            Start-Sleep -Seconds 1
+            Start-Sleep -Seconds $BetweenIncrementsSeconds
             $txt = ""
             if (Test-Path $stderr) { $txt = Get-Content -Path $stderr -Raw -ErrorAction SilentlyContinue }
             $parsed = Parse-SwarmFinal $txt
