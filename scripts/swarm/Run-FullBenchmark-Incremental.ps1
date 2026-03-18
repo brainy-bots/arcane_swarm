@@ -44,6 +44,58 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = $PSScriptRoot
 $BenchmarkRoot = Resolve-Path (Join-Path $ScriptDir "..\..")
 
+#
+# Thin wrapper: delegate all benchmark logic to Run-Benchmark-Scenarios.ps1
+# (no duplicated stepping logic).
+#
+$ScenarioScript = Join-Path $ScriptDir "Run-Benchmark-Scenarios.ps1"
+$BaseOutDir = $OutDir
+if ([string]::IsNullOrWhiteSpace($BaseOutDir)) {
+    $BaseOutDir = Join-Path $ScriptDir "full_benchmark_incremental_runs"
+}
+
+# SpacetimeDB-only scenario (no Arcane cluster scenarios)
+& $ScenarioScript `
+    -SpacetimeHost $SpacetimeHost `
+    -DatabaseName $DatabaseName `
+    -StartPlayers $SpacetimeStep `
+    -StepPlayers $SpacetimeStep `
+    -MaxPlayers $SpacetimeMaxPlayers `
+    -IncrementWindowSeconds $DurationSeconds `
+    -BetweenIncrementsSeconds 1 `
+    -TickRateHz 10 `
+    -ActionsPerSec 2 `
+    -ReadRateHz 5 `
+    -SwarmMode "spread" `
+    -MaxErrRate $MaxErrRate `
+    -MaxLatencyMs $MaxLatencyMs `
+    -ArcaneClusterCounts @() `
+    -PersistBatchSize $PersistBatchSize `
+    -OutDir (Join-Path $BaseOutDir "spacetimedb_only")
+
+if ($FindArcaneCeiling) {
+    # Arcane+Spacetime scenarios for each num_servers
+    & $ScenarioScript `
+        -SpacetimeHost $SpacetimeHost `
+        -DatabaseName $DatabaseName `
+        -StartPlayers $ArcaneCeilingStartPlayers `
+        -StepPlayers $ArcaneCeilingStep `
+        -MaxPlayers $ArcaneCeilingMaxPlayers `
+        -IncrementWindowSeconds $DurationSeconds `
+        -BetweenIncrementsSeconds 1 `
+        -TickRateHz 10 `
+        -ActionsPerSec 2 `
+        -ReadRateHz 5 `
+        -SwarmMode "spread" `
+        -MaxErrRate $MaxErrRate `
+        -MaxLatencyMs $MaxLatencyMs `
+        -ArcaneClusterCounts $ArcaneClusterCounts `
+        -PersistBatchSize $PersistBatchSize `
+        -OutDir (Join-Path $BaseOutDir "arcane_plus_spacetimedb")
+}
+
+return
+
 function Stop-ArcaneProcesses {
     $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^arcane-' }
     if ($procs) {
