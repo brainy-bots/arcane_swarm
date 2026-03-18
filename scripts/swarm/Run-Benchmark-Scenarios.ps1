@@ -88,6 +88,38 @@ function Stop-ArcaneProcesses {
     }
 }
 
+function Wait-TcpOpen([string] $Host, [int] $Port, [int] $TimeoutSeconds) {
+    for ($i=0; $i -lt $TimeoutSeconds; $i++) {
+        $ok = (Test-NetConnection -ComputerName $Host -Port $Port -WarningAction SilentlyContinue).TcpTestSucceeded
+        if ($ok) { return $true }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
+function Assert-ProcessAlive([int[]] $Pids, [string] $What) {
+    foreach ($pid in $Pids) {
+        if (-not $pid) { continue }
+        $p = Get-Process -Id $pid -ErrorAction SilentlyContinue
+        if (-not $p) {
+            throw "$What: process id $pid is not running"
+        }
+    }
+}
+
+function Safe-Kill([int] $Pid, [string] $What) {
+    if (-not $Pid) { return }
+    try {
+        $p = Get-Process -Id $Pid -ErrorAction SilentlyContinue
+        if ($p) {
+            Stop-Process -Id $Pid -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 500
+        }
+    } catch {
+        Write-Warning "Failed to stop $What (pid=$Pid): $($_.Exception.Message)"
+    }
+}
+
 function Ensure-SpacetimeRunning {
     # We only know SpacetimeDB is reachable by port; module publish requires it.
     $dbUrl = $SpacetimeHost
@@ -210,6 +242,10 @@ function Run-Scenario-SpacetimeOnly {
             "--db",$DatabaseName
         )
 
+    if (-not (Wait-TcpOpen -Host "127.0.0.1" -Port $ControlPort -TimeoutSeconds 20)) {
+        throw "swarm control port $ControlPort was not opened (spacetime-only scenario)"
+    }
+
     $players = $ScenarioStartPlayers
     $ceiling = $null
     try {
@@ -236,7 +272,7 @@ function Run-Scenario-SpacetimeOnly {
         }
     } finally {
         Send-SwarmCommand -Port $ControlPort -Line "QUIT"
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        Safe-Kill -Pid $proc.Id -What "swarm"
     }
 
     return $ceiling
@@ -307,6 +343,24 @@ function Run-Scenario-Arcane {
 
     Start-Sleep -Seconds 3
 
+    # Verify manager and clusters are actually accepting connections
+    if (-not (Wait-TcpOpen -Host "127.0.0.1" -Port $managerPort -TimeoutSeconds 20)) {
+        throw "arcane-manager did not open port $managerPort"
+    }
+    for ($i=0; $i -lt $NumServers; $i++) {
+        $wsPort = $clusterBasePort + $i
+        if (-not (Wait-TcpOpen -Host "127.0.0.1" -Port $wsPort -TimeoutSeconds 20)) {
+            throw "arcane-cluster[$i] did not open websocket port $wsPort"
+        }
+    }
+    Assert-ProcessAlive -Pids $clusterPids -What "cluster"
+    Assert-ProcessAlive -Pids @($procManager.Id) -What "manager"
+
+    # Verify swarm control port is reachable (TCP control server in swarm)
+    if (-not (Wait-TcpOpen -Host "127.0.0.1" -Port $ControlPort -TimeoutSeconds 20)) {
+        throw "swarm control port $ControlPort was not opened"
+    }
+
     $stderr = Join-Path $StdErrDir "arcane_${NumServers}_${ControlPort}_stderr.log"
     $stdout = Join-Path $StdErrDir "arcane_${NumServers}_${ControlPort}_stdout.log"
     if (Test-Path $stderr) { Remove-Item $stderr -Force }
@@ -357,11 +411,11 @@ function Run-Scenario-Arcane {
         }
     } finally {
         Send-SwarmCommand -Port $ControlPort -Line "QUIT"
-        Stop-Process -Id $procSwarm.Id -Force -ErrorAction SilentlyContinue
+        Safe-Kill -Pid $procSwarm.Id -What "swarm"
 
         # Cleanup arcane processes
-        foreach ($pid in $clusterPids) { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue }
-        Stop-Process -Id $procManager.Id -Force -ErrorAction SilentlyContinue
+        foreach ($pid in $clusterPids) { Safe-Kill -Pid $pid -What "cluster" }
+        Safe-Kill -Pid $procManager.Id -What "manager"
     }
 
     return $ceiling
@@ -398,4 +452,7 @@ foreach ($n in $ArcaneClusterCounts) {
 $csv = Join-Path $OutDir "benchmark_scenarios_results.csv"
 $results | Export-Csv -Path $csv -NoTypeInformation
 Write-Host "Results written to: $csv" -ForegroundColor Green
+
+# Final cleanup so readers can re-run immediately
+Stop-ArcaneProcesses
 
