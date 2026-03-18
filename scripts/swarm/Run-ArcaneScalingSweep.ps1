@@ -28,12 +28,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptDir = $PSScriptRoot
 $BenchmarkRoot = Resolve-Path (Join-Path $ScriptDir "..\..")
-$ArcaneDemosRepo = Join-Path $BenchmarkRoot "arcane-demos"
 $ArcaneRepo = Join-Path $BenchmarkRoot "arcane"
-
-if (-not (Test-Path $ArcaneDemosRepo)) {
-    throw "arcane-demos submodule not found at $ArcaneDemosRepo. Run: git submodule update --init --recursive"
-}
 if (-not (Test-Path $ArcaneRepo)) {
     throw "arcane submodule not found at $ArcaneRepo. Run: git submodule update --init --recursive"
 }
@@ -56,11 +51,12 @@ $CanonicalBackend = "arcane_plus_spacetimedb"
 $ClusterBasePort = 8090
 $ManagerPort = 8081
 
-# Paths (binaries from submodules)
-$ExeSwarm = Join-Path $ArcaneDemosRepo "target\release\arcane-swarm.exe"
-$ExeClusterDemo = Join-Path $ArcaneDemosRepo "target\release\arcane-cluster-demo.exe"
+# Paths (binaries and vendored runtime)
+$SwarmCrateRoot = Join-Path $BenchmarkRoot "crates\arcane-benchmark-swarm"
+$ExeSwarm = Join-Path $SwarmCrateRoot "target\release\arcane-swarm.exe"
+$ExeCluster = Join-Path $ArcaneRepo "target\release\arcane-cluster.exe"
 $ExeManager = Join-Path $ArcaneRepo "target\release\arcane-manager.exe"
-$ModulePath = Join-Path $ArcaneDemosRepo "spacetimedb_demo\spacetimedb"
+$ModulePath = Join-Path $BenchmarkRoot "spacetimedb_demo\spacetimedb"
 
 # Resolve SpacetimeDB CLI for publish
 $SpacetimeAvailable = $false
@@ -93,19 +89,26 @@ if (-not $NoPublish) {
     Write-Host "Module published to $SpacetimeHost / $DatabaseName" -ForegroundColor Green
 }
 
-# Build arcane-swarm and arcane-cluster-demo (arcane-demos submodule)
+# Build arcane-swarm (vendored in this benchmark repo)
 if (-not (Test-Path $ExeSwarm)) {
     Write-Host "Building arcane-swarm (release)..." -ForegroundColor Yellow
-    Push-Location $ArcaneDemosRepo
-    cmd /c "cargo build -p arcane-demo --bin arcane-swarm --features swarm --release 2>&1"
+    Push-Location $SwarmCrateRoot
+    cmd /c "cargo build --bin arcane-swarm --release 2>&1"
     if ($LASTEXITCODE -ne 0) { Pop-Location; throw "arcane-swarm build failed" }
     Pop-Location
 }
-if (-not (Test-Path $ExeClusterDemo)) {
-    Write-Host "Building arcane-cluster-demo (release)..." -ForegroundColor Yellow
-    Push-Location $ArcaneDemosRepo
-    cmd /c "cargo build -p arcane-demo --bin arcane-cluster-demo --release 2>&1"
-    if ($LASTEXITCODE -ne 0) { Pop-Location; throw "arcane-cluster-demo build failed" }
+
+# Build arcane-cluster (infrastructure-only cluster server)
+if (-not (Test-Path $ExeCluster)) {
+    Write-Host "Building arcane-cluster (release)..." -ForegroundColor Yellow
+    Push-Location $ArcaneRepo
+    # Try enabling SpacetimeDB persistence; if not available in this Arcane version, fall back.
+    cmd /c "cargo build -p arcane-infra --bin arcane-cluster --features \"cluster-ws spacetimedb-persist\" --release 2>&1"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "arcane-cluster build with spacetimedb-persist failed; retrying without persistence feature."
+        cmd /c "cargo build -p arcane-infra --bin arcane-cluster --features \"cluster-ws\" --release 2>&1"
+        if ($LASTEXITCODE -ne 0) { Pop-Location; throw "arcane-cluster build failed" }
+    }
     Pop-Location
 }
 
@@ -208,7 +211,7 @@ for ($i = 0; $i -lt $NumServers; $i++) {
     $clusterLog = Join-Path $LogDir "cluster_$i.log"
     $clusterErrLog = Join-Path $LogDir "cluster_${i}_err.log"
     Write-Host "  Starting cluster $i on port $($env:CLUSTER_WS_PORT) (physics + persist); log: $clusterLog" -ForegroundColor Gray
-    $proc = Start-Process -FilePath $ExeClusterDemo -WorkingDirectory $ArcaneDemosRepo -PassThru -NoNewWindow `
+    $proc = Start-Process -FilePath $ExeCluster -WorkingDirectory $ArcaneRepo -PassThru -NoNewWindow `
         -RedirectStandardOutput $clusterLog -RedirectStandardError $clusterErrLog
     $clusterPids += $proc.Id
 }
@@ -246,7 +249,7 @@ try {
         "--duration", $CanonicalDurationSec,
         "--mode", $CanonicalMode,
         "--read-rate", $CanonicalReadRateHz
-    ) -WorkingDirectory $ArcaneDemosRepo -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr -Wait -NoNewWindow -PassThru
+    ) -WorkingDirectory $SwarmCrateRoot -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr -Wait -NoNewWindow -PassThru
     $out = Get-Content -Path $tmpOut -Raw -ErrorAction SilentlyContinue
     $err = Get-Content -Path $tmpErr -Raw -ErrorAction SilentlyContinue
     $all = if ($out) { $out } else { "" }; if ($err) { $all += "`n" + $err }

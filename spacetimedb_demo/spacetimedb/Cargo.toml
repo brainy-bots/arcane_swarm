@@ -1,0 +1,19 @@
+[workspace]
+
+[package]
+name = "arcane-demo-spacetimedb"
+version = "0.1.0"
+edition = "2021"
+description = "SpacetimeDB module for Arcane demo: Entity table + set_entities reducer (external sim writes state each tick)."
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = ["server_physics"]
+# Intended pattern per SpacetimeDB docs: input in private table, scheduled physics writes Entity. Disable for position-only mode.
+server_physics = []
+
+[dependencies]
+spacetimedb = "2.0"
+log = "0.4"

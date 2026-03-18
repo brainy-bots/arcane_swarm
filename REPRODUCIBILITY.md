@@ -1,6 +1,8 @@
 # Reproducing the experiment
 
-This document gives step-by-step instructions to run the same scaling experiments on your machine. The repository is self-contained: it includes the orchestration scripts and uses **Arcane** and **arcane-demos** as Git submodules for the binaries and SpacetimeDB module.
+This document gives step-by-step instructions to run the same scaling experiments on your machine. The repository is self-contained: it includes the orchestration scripts and vendors the SpacetimeDB module source and swarm runtime code.
+
+The only Git submodule needed is **`arcane/`** (for the Arcane manager/cluster binaries).
 
 ---
 
@@ -26,7 +28,7 @@ If you already cloned without `--recurse-submodules`:
 git submodule update --init --recursive
 ```
 
-You should see `arcane/` and `arcane-demos/` populated. The scripts expect these two directories as siblings of the benchmark repo root.
+You should see `arcane/` populated. The scripts expect it as a sibling directory of the benchmark repo root.
 
 ---
 
@@ -58,7 +60,7 @@ Or specific player counts:
 .\Run-SpacetimeDBCeilingSweep.ps1 -PlayerCounts 250,500,750,1000,1250
 ```
 
-Results are appended to `spacetimedb_ceiling_sweep.csv` in the same directory. First run will build the SpacetimeDB module and `arcane-swarm-sdk` from the `arcane-demos` submodule.
+Results are appended to `spacetimedb_ceiling_sweep.csv` in the same directory. First run will build/publish the vendored SpacetimeDB module and build the benchmark swarm runtime (`crates/arcane-benchmark-swarm`).
 
 ---
 
@@ -79,7 +81,9 @@ Examples:
 - With persist batch cap 500 (for comparison):  
   `.\Run-ArcaneScalingSweep.ps1 -NumServers 3 -PlayersTotal 4000 -PersistBatchSize 500`
 
-Results are appended to `arcane_scaling_sweep.csv`. Logs (manager and per-cluster) go to `arcane_scaling_logs/`. The first run builds `arcane-swarm`, `arcane-cluster-demo`, and `arcane-manager` from the submodules.
+Results are appended to `arcane_scaling_sweep.csv`. Logs (manager and per-cluster) go to `arcane_scaling_logs/`. The first run builds:
+- `crates/arcane-benchmark-swarm` (for `arcane-swarm`)
+- `arcane/` (for `arcane-manager` and `arcane-cluster`)
 
 ---
 

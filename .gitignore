@@ -12,3 +12,6 @@ Thumbs.db
 # Logs and local outputs (if any are ever written here)
 *.log
 *.csv
+
+# Rust build outputs
+**/target/

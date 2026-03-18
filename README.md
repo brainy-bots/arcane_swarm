@@ -76,7 +76,7 @@ All runs use the same workload so that SpacetimeDB-only and Arcane+SpacetimeDB r
 
 ### 3.2 Harness and Scripts
 
-This repository is self-contained: it includes the **orchestration scripts** (`scripts/swarm/Run-ArcaneScalingSweep.ps1`, `Run-SpacetimeDBCeilingSweep.ps1`) and uses the **arcane** and **arcane-demos** repositories as Git submodules for the binaries and SpacetimeDB module. Clone with `--recurse-submodules` (or run `git submodule update --init --recursive`) so that the scripts can build and run the swarm, manager, and cluster processes. Step-by-step reproducibility is in [REPRODUCIBILITY.md](REPRODUCIBILITY.md).
+This repository is self-contained: it includes the **orchestration scripts** (`scripts/swarm/Run-ArcaneScalingSweep.ps1`, `Run-SpacetimeDBCeilingSweep.ps1`) plus the benchmark swarm code and the SpacetimeDB module source. The only Git submodule needed is **`arcane/`** (for the Arcane manager/cluster binaries). Clone with `--recurse-submodules` (or run `git submodule update --init --recursive`) so `arcane/` is populated. Step-by-step reproducibility is in [REPRODUCIBILITY.md](REPRODUCIBILITY.md).
 
 ### 3.3 Single-Machine Constraint
 
@@ -106,7 +106,7 @@ Single SpacetimeDB module; physics and persistence in the module.
 
 Arcane clusters replicate via Redis; each cluster persists to SpacetimeDB at 1 Hz with **at most 500 entities per HTTP request** (multiple requests per persist window when entity count &gt; 500).
 
-Representative results (passing runs first; then failing). Full sweep data are in the arcane-demos CSV outputs.
+Representative results (passing runs first; then failing). Full sweep data are written to CSVs by the scripts in `scripts/swarm/`.
 
 | Clusters | Players | err_rate_pct | lat_avg_ms | Pass |
 |----------|---------|--------------|------------|------|

@@ -26,14 +26,14 @@ param(
 $ErrorActionPreference = "Stop"
 $ScriptDir = $PSScriptRoot
 $BenchmarkRoot = Resolve-Path (Join-Path $ScriptDir "..\..")
-$ArcaneDemosRepo = Join-Path $BenchmarkRoot "arcane-demos"
-
-if (-not (Test-Path $ArcaneDemosRepo)) {
-    throw "arcane-demos submodule not found at $ArcaneDemosRepo. Run: git submodule update --init --recursive"
-}
-
-$ModulePath = Join-Path $ArcaneDemosRepo "spacetimedb_demo\spacetimedb"
-$Exe = Join-Path $ArcaneDemosRepo "target\release\arcane-swarm-sdk.exe"
+#
+# Benchmark runtime is vendored into this repo:
+# - swarm binary: crates/arcane-benchmark-swarm
+# - SpacetimeDB module source: spacetimedb_demo/spacetimedb
+#
+$ModulePath = Join-Path $BenchmarkRoot "spacetimedb_demo\spacetimedb"
+$Exe = Join-Path $BenchmarkRoot "crates\arcane-benchmark-swarm\target\release\arcane-swarm.exe"
+$SwarmCrateRoot = Join-Path $BenchmarkRoot "crates\arcane-benchmark-swarm"
 if ($OutCsv -eq "") { $OutCsv = Join-Path $ScriptDir "spacetimedb_ceiling_sweep.csv" }
 
 # Canonical parameters (must match Arcane+Spacetime runs for comparable ceilings)
@@ -80,11 +80,11 @@ if (-not $NoPublish) {
     Write-Host "Module published to $SpacetimeHost / $DatabaseName" -ForegroundColor Green
 }
 
-# Build arcane-swarm-sdk
+# Build arcane-swarm (vendored in this benchmark repo)
 if (-not (Test-Path $Exe)) {
-    Write-Host "Building arcane-swarm-sdk (release)..." -ForegroundColor Yellow
-    Push-Location $ArcaneDemosRepo
-    cmd /c "cargo build -p arcane-demo --bin arcane-swarm-sdk --features swarm-sdk --release 2>&1"
+    Write-Host "Building arcane-swarm (release)..." -ForegroundColor Yellow
+    Push-Location $SwarmCrateRoot
+    cmd /c "cargo build --bin arcane-swarm --release 2>&1"
     if ($LASTEXITCODE -ne 0) { Pop-Location; throw "Build failed" }
     Pop-Location
 }
@@ -178,9 +178,9 @@ foreach ($N in $runs) {
             "--duration", $CanonicalDurationSec,
             "--mode", $CanonicalMode,
             "--server-physics",
-            "--host", $SpacetimeHost,
+            "--uri", $SpacetimeHost,
             "--db", $DatabaseName
-        ) -WorkingDirectory $ArcaneDemosRepo -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr -Wait -NoNewWindow -PassThru
+        ) -WorkingDirectory $BenchmarkRoot -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr -Wait -NoNewWindow -PassThru
         $out = Get-Content -Path $tmpOut -Raw -ErrorAction SilentlyContinue
         $err = Get-Content -Path $tmpErr -Raw -ErrorAction SilentlyContinue
         $all = if ($out) { $out } else { "" }; if ($err) { $all += "`n" + $err }
