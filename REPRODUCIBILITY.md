@@ -105,3 +105,12 @@ Do not run multiple sweeps in parallel on the same machine. They use fixed ports
 ## 7. Canonical parameters
 
 All runs use the same workload and pass criteria. See [docs/CANONICAL_PARAMETERS.md](docs/CANONICAL_PARAMETERS.md).
+
+## 8. One-command full benchmark
+
+For an end-to-end run (SpacetimeDB-only ceiling + Arcane+SpacetimeDB ceilings for multiple cluster counts), run:
+
+```powershell
+cd scripts\swarm
+.\Run-FullBenchmark.ps1
+```
