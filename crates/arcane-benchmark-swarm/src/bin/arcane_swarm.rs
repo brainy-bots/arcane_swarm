@@ -16,7 +16,7 @@
 //! With --arcane-ws: all players connect to one cluster (single server).
 //! With --arcane-manager: each player does GET manager/join; players are spread round-robin across clusters (see docs/ARCANE_BENCHMARK_SETUP.md).
 
-use std::sync::atomic::{AtomicU64, AtomicI64, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicI64, AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time;
@@ -42,6 +42,8 @@ struct Config {
     arcane_ws: String,
     arcane_manager: Option<String>,
     players: u32,
+    /// Max players the swarm is allowed to spawn (used for incremental SET_PLAYERS without reallocating).
+    max_players: u32,
     tick_rate: u32,
     duration_secs: u64,
     mode: SwarmMode,
@@ -54,6 +56,15 @@ struct Config {
     /// - subsequent ticks use `update_player_input` (direction only)
     /// This matches the SpacetimeDB module's server_physics mode.
     server_physics: bool,
+    /// If true, ignore duration and run until QUIT is received on the control port.
+    run_forever: bool,
+    /// If > 0, enable a line-based TCP control server on 127.0.0.1:control_port.
+    /// Commands:
+    ///  - SET_PLAYERS <n>
+    ///  - RESET
+    ///  - REPORT
+    ///  - QUIT
+    control_port: u16,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -64,6 +75,7 @@ enum Backend { SpacetimeDb, Arcane }
 
 fn parse_args() -> Config {
     let mut players: u32 = 100;
+    let mut max_players: u32 = 0;
     let mut tick_rate: u32 = 20;
     let mut duration_secs: u64 = 60;
     let mut mode = SwarmMode::Spread;
@@ -76,6 +88,8 @@ fn parse_args() -> Config {
     let mut actions_per_sec: f64 = 0.0;
     let mut read_rate: f64 = 5.0;
     let mut server_physics: bool = false;
+    let mut run_forever: bool = false;
+    let mut control_port: u16 = 0;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -94,16 +108,22 @@ fn parse_args() -> Config {
             "--actions-per-sec" | "--aps" => { i += 1; actions_per_sec = args[i].parse().unwrap_or(0.0); }
             "--read-rate" => { i += 1; read_rate = args[i].parse().unwrap_or(5.0); }
             "--server-physics" => { server_physics = true; }
+            "--max-players" => { i += 1; max_players = args[i].parse().unwrap_or(players); }
+            "--run-forever" => { run_forever = true; }
+            "--control-port" => { i += 1; control_port = args[i].parse().unwrap_or(0); }
             "--help" | "-h" => {
                 eprintln!("arcane-swarm: headless client swarm\n");
                 eprintln!("  --backend MODE        spacetimedb | arcane (default spacetimedb)");
                 eprintln!("  --players N            number of simulated players (default 100)");
+                eprintln!("  --max-players N       max players for incremental mode (default = --players)");
                 eprintln!("  --tick-rate HZ         ticks per second per player (default 20)");
                 eprintln!("  --duration SECS        how long to run (default 60)");
                 eprintln!("  --mode MODE            spread | clustered (default spread)");
                 eprintln!("  --actions-per-sec N    persistent actions per player per second (default 0)");
                 eprintln!("  --read-rate HZ         world-state reads per player per second (default 5)");
                 eprintln!("  --server-physics      for spacetimedb backend: use update_player_input for movement");
+                eprintln!("  --run-forever          keep running until QUIT");
+                eprintln!("  --control-port PORT   enable TCP control server at 127.0.0.1:PORT");
                 eprintln!("  --csv PATH             write metrics CSV to this file");
                 eprintln!("  --uri URL              SpacetimeDB URI (default http://127.0.0.1:3000)");
                 eprintln!("  --database NAME        database name (default arcane)");
@@ -123,6 +143,7 @@ fn parse_args() -> Config {
         arcane_ws,
         arcane_manager,
         players,
+        max_players: if max_players == 0 { players } else { max_players },
         tick_rate: tick_rate.max(1),
         duration_secs,
         mode,
@@ -131,6 +152,8 @@ fn parse_args() -> Config {
         actions_per_sec,
         read_rate,
         server_physics,
+        run_forever,
+        control_port,
     }
 }
 
@@ -389,7 +412,7 @@ async fn action_loop(
     urls: ActionUrls,
     player_id: uuid::Uuid,
     player_idx: u32,
-    total_players: u32,
+    total_players: Arc<AtomicU32>,
     all_ids: Arc<Vec<uuid::Uuid>>,
     actions_per_sec: f64,
     action_metrics: Arc<Metrics>,
@@ -404,7 +427,8 @@ async fn action_loop(
     while !stop.load(Ordering::Relaxed) {
         interval.tick().await;
         tick += 1;
-        let action = random_action(player_idx, total_players, tick);
+        let total_now = total_players.load(Ordering::Relaxed);
+        let action = random_action(player_idx, total_now, tick);
 
         let (url, body) = match action {
             GameAction::PickupItem { item_type, quantity } => {
@@ -781,6 +805,341 @@ async fn run_reporter(
     }
 }
 
+async fn run_control_mode(cfg: Config, tick_interval: Duration) {
+    let backend_name = if cfg.backend == Backend::Arcane { "arcane" } else { "spacetimedb" };
+    eprintln!(
+        "arcane-swarm(control): initial_players={}, max_players={}, tick_rate={}, mode={}, backend={}, server_physics={}, actions/s={:.1}, read_rate={:.1}Hz control_port={}",
+        cfg.players,
+        cfg.max_players,
+        cfg.tick_rate,
+        if cfg.mode == SwarmMode::Clustered { "clustered" } else { "spread" },
+        backend_name,
+        cfg.server_physics,
+        cfg.actions_per_sec,
+        cfg.read_rate,
+        cfg.control_port
+    );
+
+    let desired_players = Arc::new(AtomicU32::new(cfg.players.min(cfg.max_players)));
+    let total_players_atomic = desired_players.clone();
+    let stop_all = Arc::new(AtomicBool::new(false));
+
+    let metrics = Arc::new(Metrics::new());
+    let action_metrics = Arc::new(Metrics::new());
+    let read_metrics = Arc::new(Metrics::new());
+
+    let max_players = cfg.max_players;
+    // 0..max => player tasks, max..2*max => action tasks
+    let mut handles: Vec<Option<tokio::task::JoinHandle<()>>> = (0..(max_players as usize * 2)).map(|_| None).collect();
+
+    let all_ids: Arc<Vec<uuid::Uuid>> = Arc::new((0..max_players).map(|_| uuid::Uuid::new_v4()).collect());
+
+    let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
+    let base = format!("{}/v1/database/{}/call", stdb_base, cfg.database);
+    let sql_url = format!("{}/v1/database/{}/sql", stdb_base, cfg.database);
+    let action_urls = ActionUrls {
+        pickup: format!("{}/pickup_item", base),
+        use_item: format!("{}/use_item", base),
+        interact: format!("{}/player_interact", base),
+    };
+
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .pool_max_idle_per_host(max_players as usize * 2)
+        .build()
+        .expect("HTTP client");
+
+    let positions = Arc::new(SharedPositions::new(max_players));
+    let cluster_flag = cfg.cluster_command.clone();
+
+    let arcane_endpoint = match &cfg.arcane_manager {
+        Some(base) => ArcaneEndpoint::ManagerJoin { base_url: base.clone() },
+        None => ArcaneEndpoint::SingleUrl(cfg.arcane_ws.clone()),
+    };
+
+    // Precreate per-player stop flags so control tasks can stop everyone without synchronization.
+    let player_stop_flags: Arc<Vec<Arc<AtomicBool>>> = Arc::new(
+        (0..max_players)
+            .map(|_| Arc::new(AtomicBool::new(true)))
+            .collect(),
+    );
+
+    let set_stop_for_all = {
+        let player_stop_flags = player_stop_flags.clone();
+        let stop_all = stop_all.clone();
+        move || {
+            stop_all.store(true, Ordering::Relaxed);
+            for flag in player_stop_flags.iter() {
+                flag.store(true, Ordering::Relaxed);
+            }
+        }
+    };
+
+    // Spawn initial players (and their optional read/action tasks).
+    let initial = desired_players.load(Ordering::Relaxed) as usize;
+    let mut current_spawned: usize = 0;
+
+    let spawn_player = |idx: usize,
+                         desired_total: u32,
+                         handles: &mut Vec<Option<tokio::task::JoinHandle<()>>>,
+                         player_stop_flags: &Arc<Vec<Arc<AtomicBool>>>,
+                         http_client: &reqwest::Client,
+                         metrics: &Arc<Metrics>,
+                         action_metrics: &Arc<Metrics>,
+                         read_metrics: &Arc<Metrics>,
+                         positions: &Arc<SharedPositions>,
+                         cluster_flag: &Arc<AtomicBool>| {
+        player_stop_flags[idx].store(false, Ordering::Relaxed);
+        let stop = player_stop_flags[idx].clone();
+        match cfg.backend {
+            Backend::SpacetimeDb => {
+                // SpacetimeDB player + optional read loop.
+                let server_physics = cfg.server_physics;
+                let url_update_player = format!("{}/update_player", base);
+                let url_update_player_input = format!("{}/update_player_input", base);
+                let url_remove = format!("{}/remove_player", base);
+                let fut = player_loop_spacetimedb(
+                    http_client.clone(),
+                    url_update_player,
+                    url_update_player_input,
+                    url_remove,
+                    idx as u32,
+                    desired_total,
+                    tick_interval,
+                    metrics.clone(),
+                    stop.clone(),
+                    cluster_flag.clone(),
+                    server_physics,
+                    positions.clone(),
+                );
+                handles[idx] = Some(tokio::spawn(fut));
+
+                if cfg.read_rate > 0.0 {
+                    let read_fut = read_loop_spacetimedb(
+                        http_client.clone(),
+                        sql_url.clone(),
+                        cfg.read_rate,
+                        read_metrics.clone(),
+                        stop.clone(),
+                        idx as u32,
+                        positions.clone(),
+                    );
+                    // Use separate slot for read loop by reusing the same player slot is safe; it will stop with `stop`.
+                    // We don't store the handle for the read loop to keep the supervisor logic simpler.
+                    tokio::spawn(read_fut);
+                }
+            }
+            Backend::Arcane => {
+                let fut = player_loop_arcane(
+                    arcane_endpoint.clone(),
+                    http_client.clone(),
+                    idx as u32,
+                    desired_total,
+                    tick_interval,
+                    metrics.clone(),
+                    read_metrics.clone(),
+                    stop.clone(),
+                    cluster_flag.clone(),
+                );
+                handles[idx] = Some(tokio::spawn(fut));
+            }
+        }
+
+        // Optional actions per player.
+        if cfg.actions_per_sec > 0.0 {
+            let action_idx = max_players as usize + idx;
+            let player_id = all_ids[idx];
+            let stop2 = player_stop_flags[idx].clone();
+            let total_players = total_players_atomic.clone();
+            let fut = action_loop(
+                http_client.clone(),
+                ActionUrls {
+                    pickup: action_urls.pickup.clone(),
+                    use_item: action_urls.use_item.clone(),
+                    interact: action_urls.interact.clone(),
+                },
+                player_id,
+                idx as u32,
+                total_players,
+                all_ids.clone(),
+                cfg.actions_per_sec,
+                action_metrics.clone(),
+                stop2,
+            );
+            handles[action_idx] = Some(tokio::spawn(fut));
+        }
+    };
+
+    while current_spawned < initial {
+        let idx = current_spawned;
+        let desired_total = desired_players.load(Ordering::Relaxed);
+        spawn_player(
+            idx,
+            desired_total,
+            &mut handles,
+            &player_stop_flags,
+            &http_client,
+            &metrics,
+            &action_metrics,
+            &read_metrics,
+            &positions,
+            &cluster_flag,
+        );
+        current_spawned += 1;
+    }
+
+    // TCP control server
+    let control_task = if cfg.control_port > 0 {
+        let desired_players = desired_players.clone();
+        let stop_all = stop_all.clone();
+        let player_stop_flags = player_stop_flags.clone();
+        let metrics = metrics.clone();
+        let action_metrics = action_metrics.clone();
+        let read_metrics = read_metrics.clone();
+        Some(tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            use tokio::net::TcpListener;
+            use tokio::net::TcpStream;
+
+            let listener = TcpListener::bind(("127.0.0.1", cfg.control_port)).await
+                .expect("bind control port");
+            eprintln!("  [control] listening on 127.0.0.1:{}", cfg.control_port);
+
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => break,
+                };
+                let desired_players = desired_players.clone();
+                let stop_all = stop_all.clone();
+                let player_stop_flags = player_stop_flags.clone();
+                let metrics = metrics.clone();
+                let action_metrics = action_metrics.clone();
+                let read_metrics = read_metrics.clone();
+
+                tokio::spawn(async move {
+                    let _ = handle_control_connection(
+                        stream,
+                        desired_players,
+                        stop_all,
+                        player_stop_flags,
+                        metrics,
+                        action_metrics,
+                        read_metrics,
+                    )
+                    .await;
+                });
+            }
+        }))
+    } else {
+        None
+    };
+
+    while !stop_all.load(Ordering::Relaxed) {
+        let target = desired_players.load(Ordering::Relaxed).min(max_players) as usize;
+        if target > current_spawned {
+            for idx in current_spawned..target {
+                let desired_total = desired_players.load(Ordering::Relaxed);
+                spawn_player(
+                    idx,
+                    desired_total,
+                    &mut handles,
+                    &player_stop_flags,
+                    &http_client,
+                    &metrics,
+                    &action_metrics,
+                    &read_metrics,
+                    &positions,
+                    &cluster_flag,
+                );
+            }
+            current_spawned = target;
+        } else if target < current_spawned {
+            // Decreasing players stops those tasks, but the server may retain entities in-memory.
+            // This benchmark currently only increases, so this path is mostly for hygiene.
+            for idx in target..current_spawned {
+                player_stop_flags[idx].store(true, Ordering::Relaxed);
+            }
+            current_spawned = target;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    set_stop_for_all();
+    if let Some(h) = control_task {
+        let _ = h.await;
+    }
+    eprintln!("arcane-swarm(control): exiting.");
+
+    async fn handle_control_connection(
+        mut stream: tokio::net::TcpStream,
+        desired_players: Arc<AtomicU32>,
+        stop_all: Arc<AtomicBool>,
+        player_stop_flags: Arc<Vec<Arc<AtomicBool>>>,
+        metrics: Arc<Metrics>,
+        action_metrics: Arc<Metrics>,
+        read_metrics: Arc<Metrics>,
+    ) -> Result<(), String> {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let mut reader = BufReader::new(stream);
+        let mut buf = String::new();
+
+        loop {
+            buf.clear();
+            let n = reader.read_line(&mut buf).await.map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            let line = buf.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let cmd = parts.next().unwrap_or("");
+            match cmd {
+                "SET_PLAYERS" => {
+                    if let Some(n) = parts.next() {
+                        if let Ok(v) = n.parse::<u32>() {
+                            desired_players.store(v, Ordering::Relaxed);
+                        }
+                    }
+                }
+                "RESET" => {
+                    let _ = metrics.snapshot_and_reset();
+                    let _ = action_metrics.snapshot_and_reset();
+                    let _ = read_metrics.snapshot_and_reset();
+                }
+                "REPORT" => {
+                    let players = desired_players.load(Ordering::Relaxed);
+                    let snap = metrics.snapshot_and_reset();
+                    let total_calls = snap.ok + snap.err;
+                    let lat_avg_ms = if snap.latency_samples > 0 {
+                        snap.latency_sum_us as f64 / 1000.0 / snap.latency_samples as f64
+                    } else {
+                        0.0
+                    };
+                    eprintln!(
+                        "FINAL: players={} total_calls={} total_oks={} total_errs={} lat_avg_ms={:.2}",
+                        players, total_calls, snap.ok, snap.err, lat_avg_ms
+                    );
+                }
+                "QUIT" => {
+                    stop_all.store(true, Ordering::Relaxed);
+                    for flag in player_stop_flags.iter() {
+                        flag.store(true, Ordering::Relaxed);
+                    }
+                    break;
+                }
+                _ => {
+                    // Ignore unknown command.
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 // -- Main ------------------------------------------------------------------
 
 #[tokio::main]
@@ -788,6 +1147,11 @@ async fn main() {
     let cfg = parse_args();
     let tick_interval = Duration::from_micros(1_000_000 / cfg.tick_rate as u64);
     let backend_name = if cfg.backend == Backend::Arcane { "arcane" } else { "spacetimedb" };
+
+    if cfg.run_forever || cfg.control_port > 0 {
+        run_control_mode(cfg, tick_interval).await;
+        return;
+    }
 
     eprintln!("arcane-swarm: {} players, {} Hz, mode={}, backend={}, server_physics={}, duration={}s, actions/s={:.1}, read_rate={:.1}Hz",
         cfg.players, cfg.tick_rate,
@@ -799,6 +1163,7 @@ async fn main() {
     let action_metrics = Arc::new(Metrics::new());
     let read_metrics = Arc::new(Metrics::new());
     let stop = Arc::new(AtomicBool::new(false));
+    let total_players_atomic = Arc::new(AtomicU32::new(cfg.players));
     let mut handles = Vec::with_capacity(cfg.players as usize * 3);
 
     let all_ids: Arc<Vec<uuid::Uuid>> = Arc::new((0..cfg.players).map(|_| uuid::Uuid::new_v4()).collect());
@@ -886,7 +1251,7 @@ async fn main() {
                 },
                 player_id,
                 i,
-                cfg.players,
+                total_players_atomic.clone(),
                 all_ids.clone(),
                 cfg.actions_per_sec,
                 action_metrics.clone(),
