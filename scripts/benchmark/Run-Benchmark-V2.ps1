@@ -64,15 +64,33 @@ if (-not [string]::IsNullOrWhiteSpace($ComposeFile)) {
 
 # Image tag used by `docker run` for dynamic cluster nodes (must match manager/cluster binaries).
 $clusterInfraImage = if ($UsePublishedImages) { $resolvedInfra } else { 'arcane-v2/infra:latest' }
-$modulePath = Join-Path $RepoRoot 'spacetimedb_demo\spacetimedb'
+$modulePath = Join-Path (Join-Path $RepoRoot 'spacetimedb_demo') 'spacetimedb'
 $envFile = Join-Path $OutDir '.env.v2'
 $metricsDir = Join-Path $OutDir 'metrics'
 $logsDir = Join-Path $OutDir 'logs'
 $null = New-Item -ItemType Directory -Path $metricsDir -Force
 $null = New-Item -ItemType Directory -Path $logsDir -Force
 
+function Test-LocalPortOpen([int]$Port) {
+  try {
+    $c = [System.Net.Sockets.TcpClient]::new()
+    $c.Connect('127.0.0.1', $Port)
+    $c.Close()
+    return $true
+  } catch {
+    return $false
+  }
+}
+
 function Invoke-Compose([string]$ComposeArgs) {
-  cmd /c "docker compose -f `"$compose`" --env-file `"$envFile`" $ComposeArgs"
+  $tok = [System.Collections.Generic.List[string]]::new()
+  $tok.Add('compose')
+  $tok.Add('-f'); $tok.Add($compose)
+  $tok.Add('--env-file'); $tok.Add($envFile)
+  foreach ($w in ($ComposeArgs.Trim() -split '\s+')) {
+    if ($w.Length -gt 0) { $tok.Add($w) }
+  }
+  & docker @($tok.ToArray())
   if ($LASTEXITCODE -ne 0) { throw "docker compose failed: $ComposeArgs" }
 }
 
@@ -131,8 +149,10 @@ function Start-ClusterContainers([string[]]$Ids, [int]$NumServers, [string]$Infr
       if ($j -ne $i) { $neighbors += $Ids[$j] }
     }
     $neighborStr = ($neighbors -join ',')
-    cmd /c "docker rm -f $name 2>nul"
-    cmd /c "docker run -d --name $name --network arcane-v2-net --cpus 1 --memory 2g -e CLUSTER_ID=$($Ids[$i]) -e CLUSTER_WS_PORT=$([int](8090+$i)) -e REDIS_URL=redis://redis:6379 -e NEIGHBOR_IDS=$neighborStr `"$InfraImage`" arcane-cluster"
+    docker rm -f $name 2>$null | Out-Null
+    & docker run -d --name $name --network arcane-v2-net --cpus 1 --memory 2g `
+      -e "CLUSTER_ID=$($Ids[$i])" -e "CLUSTER_WS_PORT=$([int](8090+$i))" -e 'REDIS_URL=redis://redis:6379' -e "NEIGHBOR_IDS=$neighborStr" `
+      $InfraImage arcane-cluster
     if ($LASTEXITCODE -ne 0) { throw "failed to start cluster container $name" }
     $names += $name
   }
@@ -141,13 +161,13 @@ function Start-ClusterContainers([string[]]$Ids, [int]$NumServers, [string]$Infr
 
 function Stop-ClusterContainers([string[]]$Names) {
   foreach($n in $Names) {
-    cmd /c "docker rm -f $n 2>nul" | Out-Null
+    docker rm -f $n 2>$null | Out-Null
   }
 }
 
 function Capture-Stats([string]$ScenarioTag, [int]$Players, [int]$NumServers) {
   $outPath = Join-Path $metricsDir "docker_stats.csv"
-  $line = cmd /c "docker stats --no-stream --format `"{{.Name}},{{.CPUPerc}},{{.MemUsage}},{{.NetIO}},{{.BlockIO}}`""
+  $line = docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}},{{.NetIO}},{{.BlockIO}}' 2>&1
   $ts = (Get-Date).ToString('o')
   foreach($row in $line) {
     if ([string]::IsNullOrWhiteSpace($row)) { continue }
@@ -159,22 +179,25 @@ function Dump-Logs([string]$ScenarioTag, [string[]]$ClusterNames) {
   $base = @('arcane-v2-redis','arcane-v2-manager') + $ClusterNames
   foreach($c in $base) {
     $p = Join-Path $logsDir ("$ScenarioTag`_$c.log")
-    cmd /c "docker logs $c 2>&1" | Set-Content $p
+    docker logs $c 2>&1 | Set-Content $p
   }
 }
 
 try {
-  # initial env + build images
   Write-EnvForManager ''
-  Invoke-Compose 'build manager swarm'
+  if ($UsePublishedImages) {
+    Invoke-Compose 'pull manager swarm'
+  } else {
+    Invoke-Compose 'build manager swarm'
+  }
 
   # Spacetime-only infra
   Invoke-Compose 'up -d redis spacetimedb'
 
   # Wait for SpacetimeDB to be reachable on the host (used by `spacetime publish` CLI).
   $spOk = $false
-  for($i=0; $i -lt 60; $i++){
-    if ((Test-NetConnection -ComputerName 127.0.0.1 -Port 3000 -WarningAction SilentlyContinue).TcpTestSucceeded) {
+  for($i=0; $i -lt 120; $i++){
+    if (Test-LocalPortOpen -Port 3000) {
       $spOk = $true
       break
     }
@@ -184,9 +207,9 @@ try {
 
   # publish module from host CLI to host SpacetimeDB
   Push-Location $modulePath
-  cmd /c 'spacetime build 2>&1'
+  spacetime build 2>&1
   if ($LASTEXITCODE -ne 0) { throw 'spacetime build failed' }
-  cmd /c "spacetime publish $DatabaseName --yes 2>&1"
+  spacetime publish $DatabaseName --yes 2>&1
   if ($LASTEXITCODE -ne 0) { throw 'spacetime publish failed' }
   Pop-Location
 
@@ -196,7 +219,9 @@ try {
   $ceil = $null
   for($p=$StartPlayers; $p -le $MaxPlayers; $p += $StepPlayers){
     Write-Host "[v2 spacetimedb] players=$p" -ForegroundColor Gray
-    $out = cmd /c "docker compose -f `"$compose`" --env-file `"$envFile`" run --rm --no-deps --entrypoint arcane-swarm swarm --backend spacetimedb --server-physics --players $p --tick-rate 10 --aps 2 --read-rate 5 --mode spread --duration $DurationSeconds --uri $SpacetimeHost --db $DatabaseName 2>&1"
+    $out = & docker compose -f $compose --env-file $envFile run --rm --no-deps --entrypoint arcane-swarm swarm `
+      --backend spacetimedb --server-physics --players $p --tick-rate 10 --aps 2 --read-rate 5 --mode spread `
+      --duration $DurationSeconds --uri $SpacetimeHost --db $DatabaseName 2>&1
     ($out | Out-String) | Set-Content (Join-Path $logsDir ("spacetimedb_only_swarm_players_$p.log"))
     $parsed = Get-SwarmFinal ($out | Out-String)
     Capture-Stats -ScenarioTag 'spacetimedb_only' -Players $p -NumServers 0
@@ -218,7 +243,9 @@ try {
     $ceilA = $null
     for($p=$StartPlayers; $p -le $MaxPlayers; $p += $StepPlayers){
       Write-Host "[v2 arcane n=$n] players=$p" -ForegroundColor Gray
-      $out = cmd /c "docker compose -f `"$compose`" --env-file `"$envFile`" run --rm --no-deps --entrypoint arcane-swarm swarm --backend arcane --players $p --tick-rate 10 --aps 2 --read-rate 5 --mode spread --duration $DurationSeconds --arcane-manager http://manager:8081 --uri $SpacetimeHost --db $DatabaseName 2>&1"
+      $out = & docker compose -f $compose --env-file $envFile run --rm --no-deps --entrypoint arcane-swarm swarm `
+        --backend arcane --players $p --tick-rate 10 --aps 2 --read-rate 5 --mode spread --duration $DurationSeconds `
+        --arcane-manager http://manager:8081 --uri $SpacetimeHost --db $DatabaseName 2>&1
       ($out | Out-String) | Set-Content (Join-Path $logsDir ("arcane_n${n}_swarm_players_$p.log"))
       $parsed = Get-SwarmFinal ($out | Out-String)
       Capture-Stats -ScenarioTag 'arcane_plus_spacetimedb' -Players $p -NumServers $n
@@ -237,5 +264,5 @@ try {
 }
 finally {
   try { Invoke-Compose 'down --remove-orphans' } catch {}
-  for($i=0; $i -lt 12; $i++){ cmd /c "docker rm -f arcane-v2-cluster-$i 2>nul" | Out-Null }
+  for($i=0; $i -lt 12; $i++){ docker rm -f "arcane-v2-cluster-$i" 2>$null | Out-Null }
 }
