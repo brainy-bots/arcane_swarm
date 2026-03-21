@@ -13,5 +13,15 @@ Thumbs.db
 *.log
 *.csv
 
+# Benchmark run outputs (local / cloud download dirs)
+scripts/benchmark/v2_runs_*/
+scripts/cloud/aws_runs_*/
+
 # Rust build outputs
 **/target/
+
+# Terraform (local state; use remote backend in team setups)
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.*.log

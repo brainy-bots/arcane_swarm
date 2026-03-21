@@ -3,6 +3,8 @@
   Full benchmark with incremental player-count steps (no swarm restart per step).
 
 .DESCRIPTION
+  Runs 30+ minutes. Run in a separate PowerShell window to avoid freezing your IDE/editor.
+
   This script expects the vendored swarm binary to support a control interface:
     --run-forever --control-port <port>
   Commands over TCP:
@@ -409,7 +411,7 @@ foreach ($n in $ArcaneClusterCounts) {
     }
     Stop-Process -Id $procManager.Id -Force -ErrorAction SilentlyContinue
 
-    Write-Host "Arcane+Spacetime incremental ceiling for num_servers=$n: $ceiling players" -ForegroundColor Green
+    Write-Host "Arcane+Spacetime incremental ceiling for num_servers=${n}: $ceiling players" -ForegroundColor Green
 }
 
 Stop-ArcaneProcesses

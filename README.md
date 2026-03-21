@@ -76,7 +76,7 @@ All runs use the same workload so that SpacetimeDB-only and Arcane+SpacetimeDB r
 
 ### 3.2 Harness and Scripts
 
-This repository is self-contained: it includes the **orchestration scripts** (`scripts/swarm/Run-ArcaneScalingSweep.ps1`, `Run-SpacetimeDBCeilingSweep.ps1`) plus the benchmark swarm code and the SpacetimeDB module source. The only Git submodule needed is **`arcane/`** (for the Arcane manager/cluster binaries). Clone with `--recurse-submodules` (or run `git submodule update --init --recursive`) so `arcane/` is populated. Step-by-step reproducibility is in [REPRODUCIBILITY.md](REPRODUCIBILITY.md).
+This repository is self-contained: it includes the **orchestration scripts** (`scripts/swarm/Run-ArcaneScalingSweep.ps1`, `Run-SpacetimeDBCeilingSweep.ps1`) plus the benchmark swarm code and the SpacetimeDB module source. **Benchmark v2** (`scripts/benchmark/Run-Benchmark-V2.ps1`) can run from a **public clone only** using **published** Arcane infra + swarm container images — no submodule or private repo access ([REPRODUCIBILITY.md](REPRODUCIBILITY.md) §10a). Legacy/native sweeps still use the **`arcane/`** submodule to build manager/cluster binaries unless you only run SpacetimeDB-only steps. Step-by-step reproducibility is in [REPRODUCIBILITY.md](REPRODUCIBILITY.md).
 
 ### 3.3 Single-Machine Constraint
 
@@ -189,8 +189,8 @@ Capping the number of entities per SpacetimeDB HTTP request (e.g. 500) was inten
 
 Full step-by-step instructions are in **[REPRODUCIBILITY.md](REPRODUCIBILITY.md)**. Summary:
 
-1. **Prerequisites:** Rust, Redis (`redis://127.0.0.1:6379`), SpacetimeDB CLI, PowerShell. Start Redis and run `spacetime start` in a separate terminal.
-2. **Clone:** `git clone --recurse-submodules https://github.com/martinjms/arcane-scaling-benchmarks.git` (or clone then `git submodule update --init --recursive`).
+1. **Prerequisites:** Rust, Redis (`redis://127.0.0.1:6379`), SpacetimeDB CLI, PowerShell, Docker (for v2). Start Redis and run `spacetime start` in a separate terminal for legacy swarm scripts.
+2. **Clone:** For **v2 without submodules:** `git clone https://github.com/martinjms/arcane-scaling-benchmarks.git`. For **legacy sweeps from source:** `git clone --recurse-submodules …` (or `git submodule update --init --recursive`).
 3. **SpacetimeDB-only ceiling:** From repo root,  
    `.\scripts\swarm\Run-SpacetimeDBCeilingSweep.ps1 -FindCeiling -Step 250 -MaxPlayers 2000`  
    (optionally `-NoPublish` if the module is already published).
@@ -198,6 +198,7 @@ Full step-by-step instructions are in **[REPRODUCIBILITY.md](REPRODUCIBILITY.md)
    `.\scripts\swarm\Run-ArcaneScalingSweep.ps1 -NumServers 2 -PlayersTotal 1000`  
    Default is no persist batch cap (`-PersistBatchSize 0`); use that for the reported ceilings.
 5. **Outputs:** CSV and logs under `scripts/swarm/` (e.g. `arcane_scaling_sweep.csv`, `spacetimedb_ceiling_sweep.csv`, `arcane_scaling_logs/`). Canonical parameters are in [docs/CANONICAL_PARAMETERS.md](docs/CANONICAL_PARAMETERS.md).
+6. **Benchmark v2 (Docker, public reproducibility):** set `ARCANE_INFRA_IMAGE` / `ARCANE_SWARM_IMAGE` to published images, then `.\scripts\benchmark\Run-Benchmark-V2.ps1 -UsePublishedImages`. AWS: [docs/CLOUD_BENCHMARK_AWS.md](docs/CLOUD_BENCHMARK_AWS.md).
 
 ---
 
@@ -214,3 +215,33 @@ Full step-by-step instructions are in **[REPRODUCIBILITY.md](REPRODUCIBILITY.md)
 | Arcane+SpacetimeDB, 10 clusters | 5,500          |
 
 All runs: 10 Hz tick, 2 aps, 30 s, spread, everyone-sees-everyone. Pass: err_rate &lt; 1%, lat_avg_ms &lt; 200.
+
+
+## Benchmark v2 (containerized)
+
+A containerized, resource-limited profile is available as an intermediate step toward multi-host deployment.
+
+Run:
+
+`powershell
+cd scripts\\benchmark
+.\\Run-Benchmark-V2.ps1
+` 
+
+See docs/BENCHMARK_V2_METHOD.md for topology, limits, and caveats.
+
+## Benchmark v2 in AWS (one command)
+
+You can run the same v2 benchmark on an ephemeral AWS EC2 host:
+
+`powershell
+cd scripts\\cloud
+.\\Run-Benchmark-V2-Aws.ps1 -ArtifactBucket <your-s3-bucket> -Region us-east-1
+`
+
+This cloud runner provisions a temporary instance, executes v2 remotely, downloads artifacts locally, and cleans up cloud resources by default.
+
+Details: [docs/CLOUD_BENCHMARK_AWS.md](docs/CLOUD_BENCHMARK_AWS.md).
+
+**Artifact bucket (Terraform, recommended):** [infra/aws/terraform/README.md](infra/aws/terraform/README.md).
+

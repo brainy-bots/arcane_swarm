@@ -275,19 +275,24 @@ fn uuid_json(id: &uuid::Uuid) -> u128 {
     u128::from_be_bytes(*id.as_bytes())
 }
 
-fn entity_json(id: &uuid::Uuid, x: f64, y: f64, z: f64, vx: f64, vy: f64, vz: f64) -> String {
+fn entity_json(id: &uuid::Uuid, x: f64, y: f64, z: f64, _vx: f64, _vy: f64, _vz: f64) -> String {
+    // HTTP args for update_player(ctx, entity: Entity) — Entity is entity_id + x,y,z only.
     format!(
-        r#"[{{"entity_id":{{"__uuid__":{}}},"x":{},"y":{},"z":{},"vx":{},"vy":{},"vz":{}}}]"#,
-        uuid_json(id), x, y, z, vx, vy, vz
+        r#"[{{"entity_id":{{"__uuid__":{}}},"x":{},"y":{},"z":{}}}]"#,
+        uuid_json(id),
+        x,
+        y,
+        z
     )
 }
 
 fn player_input_json(id: &uuid::Uuid, dir_x: f64, dir_z: f64) -> String {
-    // SpacetimeDB reducer signature: update_player_input(entity_id, dir_x, dir_z)
-    // Spacetime's HTTP reducer endpoints expect a JSON array even for a single row.
+    // update_player_input(ctx, entity_id, dir_x, dir_z) — positional JSON array (see pickup_item_json).
     format!(
-        r#"[{{"entity_id":{{"__uuid__":{}}},"dir_x":{},"dir_z":{}}}]"#,
-        uuid_json(id), dir_x, dir_z
+        r#"[{{"__uuid__":{}}},{},{}]"#,
+        uuid_json(id),
+        dir_x,
+        dir_z
     )
 }
 

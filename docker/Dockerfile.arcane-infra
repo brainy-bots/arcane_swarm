@@ -1,0 +1,14 @@
+FROM rust:1.85-bookworm AS builder
+WORKDIR /app
+COPY arcane ./arcane
+WORKDIR /app/arcane
+RUN cargo build -p arcane-infra --bin arcane-manager --features manager --release && \
+    cargo build -p arcane-infra --bin arcane-cluster --features cluster-ws --release
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/arcane/target/release/arcane-manager /usr/local/bin/arcane-manager
+COPY --from=builder /app/arcane/target/release/arcane-cluster /usr/local/bin/arcane-cluster
+ENV MANAGER_HTTP_PORT=8081
+ENTRYPOINT ["/bin/sh", "-lc"]
+CMD ["arcane-manager"]
