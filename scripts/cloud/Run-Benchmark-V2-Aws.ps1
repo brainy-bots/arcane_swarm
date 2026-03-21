@@ -221,7 +221,8 @@ try {
     "export AWS_DEFAULT_REGION=$Region",
     "export ARCANE_INFRA_IMAGE='$ArcaneInfraImage'",
     "export ARCANE_SWARM_IMAGE='$ArcaneSwarmImage'",
-    "pwsh -NoLogo -NoProfile -File ./Run-Benchmark-V2.ps1 -UsePublishedImages -StartPlayers $StartPlayers -StepPlayers $StepPlayers -MaxPlayers $MaxPlayers -DurationSeconds $DurationSeconds -ArcaneClusterCounts @($clusterCsv)",
+    # Note: remote runner is /bin/sh — do not use PowerShell @( ) here; pass comma-separated ints to pwsh.
+    "pwsh -NoLogo -NoProfile -File ./Run-Benchmark-V2.ps1 -UsePublishedImages -StartPlayers $StartPlayers -StepPlayers $StepPlayers -MaxPlayers $MaxPlayers -DurationSeconds $DurationSeconds -ArcaneClusterCounts $clusterCsv",
     'LATEST_DIR=$(ls -dt v2_runs_* | head -n 1)',
     'if [ -z "$LATEST_DIR" ]; then echo ''No v2 run output found'' >&2; exit 1; fi',
     "aws s3 cp `"./`$LATEST_DIR`" `"s3://$ArtifactBucket/$remotePrefix/`$LATEST_DIR`" --recursive --region $Region",
