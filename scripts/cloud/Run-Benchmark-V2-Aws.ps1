@@ -41,8 +41,11 @@ param(
   # Only if RepoUrl is a private GitHub repo (clone). Use read-only PAT or `gh auth token` in GITHUB_TOKEN.
   [string]$GitHubToken = '',
 
-  # While SSM runs the remote script: poll for new stdout/stderr (AWS may buffer; see docs).
+  # Poll interval while waiting for the remote SSM command (blocks until Success / Failed / TimedOut).
   [int]$SsmPollSeconds = 12,
+
+  # SSM Run Command max runtime in seconds (full sweeps can exceed 2h).
+  [int]$SsmTimeoutSeconds = 21600,
 
   # Passed to Run-Benchmark-V2.ps1: print `docker stats` snapshots every N seconds (0 = off).
   [int]$DockerStatsLogIntervalSec = 90,
@@ -141,7 +144,7 @@ function Wait-ForSsmCommand([string]$CommandId, [string]$InstanceId, [int]$PollS
     $m = [int][math]::Floor($sw.Elapsed.TotalMinutes)
     $s = [int]($sw.Elapsed.TotalSeconds % 60)
     Write-Host ""
-    Write-Host "[cloud] SSM Status=$status  remote elapsed ${m}m ${s}s  (stdout ${lastOutLen} chars, stderr ${lastErrLen} chars; AWS may buffer until phases complete)" -ForegroundColor DarkGray
+    Write-Host "[cloud] SSM Status=$status  elapsed ${m}m ${s}s  (invocation stdout ${lastOutLen} chars, stderr ${lastErrLen} chars)" -ForegroundColor DarkGray
     Start-Sleep -Seconds $PollSeconds
   }
 }
@@ -149,6 +152,45 @@ function Wait-ForSsmCommand([string]$CommandId, [string]$InstanceId, [int]$PollS
 function Get-AwsFileUri([string]$Path) {
   $full = (Resolve-Path -LiteralPath $Path).Path -replace '\\','/'
   return "file://$full"
+}
+
+function Save-SsmInvocationSnapshot {
+  param(
+    [string]$CommandId,
+    [string]$InstanceId,
+    [string]$RegionName,
+    [string]$DestDir
+  )
+  $null = New-Item -ItemType Directory -Path $DestDir -Force
+  $snapJson = Join-Path $DestDir 'ssm_invocation.json'
+  cmd /c "aws ssm get-command-invocation --region $RegionName --command-id $CommandId --instance-id $InstanceId --output json" 2>nul |
+    Set-Content -LiteralPath $snapJson -Encoding utf8
+  $outTxt = Join-Path $DestDir 'ssm_StandardOutputContent.txt'
+  $errTxt = Join-Path $DestDir 'ssm_StandardErrorContent.txt'
+  @(
+    'SSM get-command-invocation StandardOutputContent (AWS API may truncate long output; see orchestrator_console.log in the downloaded run folder for the full remote log).'
+    '---'
+  ) | Set-Content -LiteralPath $outTxt -Encoding utf8
+  cmd /c "aws ssm get-command-invocation --region $RegionName --command-id $CommandId --instance-id $InstanceId --query StandardOutputContent --output text" 2>nul |
+    Add-Content -LiteralPath $outTxt -Encoding utf8
+  @(
+    'SSM get-command-invocation StandardErrorContent (may be truncated by API).'
+    '---'
+  ) | Set-Content -LiteralPath $errTxt -Encoding utf8
+  cmd /c "aws ssm get-command-invocation --region $RegionName --command-id $CommandId --instance-id $InstanceId --query StandardErrorContent --output text" 2>nul |
+    Add-Content -LiteralPath $errTxt -Encoding utf8
+}
+
+function Write-ArtifactManifest {
+  param([string]$RootDir, [string]$S3Uri)
+  $mf = Join-Path $RootDir 'MANIFEST.txt'
+  $lines = [System.Collections.Generic.List[string]]::new()
+  $lines.Add("generated_utc=$(([DateTime]::UtcNow).ToString('o'))")
+  $lines.Add("s3_prefix=$S3Uri")
+  Get-ChildItem -LiteralPath $RootDir -Recurse -File -ErrorAction SilentlyContinue |
+    Sort-Object FullName |
+    ForEach-Object { $lines.Add(('{0,12} {1}' -f $_.Length, $_.FullName)) }
+  $lines | Set-Content -LiteralPath $mf -Encoding utf8
 }
 
 if ([string]::IsNullOrWhiteSpace($LocalOutDir)) {
@@ -272,12 +314,13 @@ try {
     "export ARCANE_INFRA_IMAGE='$ArcaneInfraImage'",
     "export ARCANE_SWARM_IMAGE='$ArcaneSwarmImage'",
     'export PATH="/root/.cargo/bin:/root/.local/bin:/root/.spacetime/bin:$PATH"',
-    "echo '=== arcane-cloud: starting Run-Benchmark-V2.ps1 (compose up, spacetime publish, sweeps) ==='",
-    # Note: remote runner is /bin/sh — do not use PowerShell @( ) here; pass comma-separated ints to pwsh.
-    "pwsh -NoLogo -NoProfile -File ./Run-Benchmark-V2.ps1 -UsePublishedImages -DockerStatsLogIntervalSec $DockerStatsLogIntervalSec -StartPlayers $StartPlayers -StepPlayers $StepPlayers -MaxPlayers $MaxPlayers -DurationSeconds $DurationSeconds -ArcaneClusterCounts $clusterCsv",
+    "echo '=== arcane-cloud: starting Run-Benchmark-V2.ps1 (full console -> /tmp/arcane_bench_console.log, then S3) ==='",
+    # Remote is /bin/sh: capture ALL pwsh stdout/stderr to a file (SSM API truncates invocation output); upload that file with artifacts.
+    "pwsh -NoLogo -NoProfile -File ./Run-Benchmark-V2.ps1 -UsePublishedImages -DockerStatsLogIntervalSec $DockerStatsLogIntervalSec -StartPlayers $StartPlayers -StepPlayers $StepPlayers -MaxPlayers $MaxPlayers -DurationSeconds $DurationSeconds -ArcaneClusterCounts $clusterCsv > /tmp/arcane_bench_console.log 2>&1; ec=`$?; if [ `$ec -ne 0 ]; then echo 'Run-Benchmark-V2.ps1 failed'; tail -n 200 /tmp/arcane_bench_console.log >&2; exit `$ec; fi",
     'LATEST_DIR=$(ls -dt v2_runs_* | head -n 1)',
     'if [ -z "$LATEST_DIR" ]; then echo ''No v2 run output found'' >&2; exit 1; fi',
     "aws s3 cp `"./`$LATEST_DIR`" `"s3://$ArtifactBucket/$remotePrefix/`$LATEST_DIR`" --recursive --region $Region",
+    "if [ -f /tmp/arcane_bench_console.log ]; then aws s3 cp /tmp/arcane_bench_console.log s3://$ArtifactBucket/$remotePrefix/`$LATEST_DIR/orchestrator_console.log --region $Region; fi",
     "echo `"s3://$ArtifactBucket/$remotePrefix/`$LATEST_DIR`" | tee /tmp/arcane_v2_s3_path.txt",
     "aws s3 cp /tmp/arcane_v2_s3_path.txt `"s3://$ArtifactBucket/$remotePrefix/s3_path.txt`" --region $Region"
   )
@@ -288,27 +331,21 @@ try {
   $ssmParamsOnly = @{ commands = $remoteCommands }
   [System.IO.File]::WriteAllText($ssmParamsPath, ($ssmParamsOnly | ConvertTo-Json -Depth 12), $utf8NoBom2)
   $ssmParamsUri = Get-AwsFileUri -Path $ssmParamsPath
-  $commandId = (cmd /c "aws ssm send-command --region $Region --instance-ids $instanceId --document-name AWS-RunShellScript --comment Arcane-benchmark-v2 --timeout-seconds 7200 --parameters $ssmParamsUri --output json --query Command.CommandId --output text").Trim()
+  $commandId = (cmd /c "aws ssm send-command --region $Region --instance-ids $instanceId --document-name AWS-RunShellScript --comment Arcane-benchmark-v2 --timeout-seconds $SsmTimeoutSeconds --parameters $ssmParamsUri --output json --query Command.CommandId --output text").Trim()
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commandId) -or $commandId -eq 'None') { throw "Failed to start SSM send-command (parameters file)." }
 
-  Write-Host "Running benchmark remotely (streaming SSM output when available)..." -ForegroundColor Yellow
-  Write-Host @"
-
-  Cold EC2 run (every invocation is a new instance): expect a long bootstrap before benchmark output.
-    - ~3-10 min: apt, Docker, AWS CLI v2, PowerShell, Rust + wasm32, Spacetime CLI
-    - ~5-20 min: docker pull (clockworklabs/spacetime + redis + your GHCR images; large layers)
-    - ~2-12 min: spacetime build (Rust/WASM compile on the host)
-    - then: actual benchmark (depends on -MaxPlayers / -ArcaneClusterCounts / -DurationSeconds)
-
-  SSM often shows 0 stdout/stderr chars until a phase flushes. Heartbeat lines below mean the command is still running.
-
-"@ -ForegroundColor DarkYellow
+  Write-Host "Waiting for remote SSM command (timeout ${SsmTimeoutSeconds}s). Progress lines poll every ${SsmPollSeconds}s." -ForegroundColor Yellow
+  Write-Host "Cold EC2: bootstrap (apt, Docker, Rust, Spacetime, pulls, wasm build) runs before the benchmark loop." -ForegroundColor DarkGray
+  Write-Host "Full remote console is written to /tmp/arcane_bench_console.log on the instance and uploaded to S3 as orchestrator_console.log with the run artifacts." -ForegroundColor DarkGray
 
   $status = Wait-ForSsmCommand -CommandId $commandId -InstanceId $instanceId -PollSeconds $SsmPollSeconds
   if ($status -ne 'Success') {
     $stderr = cmd /c "aws ssm get-command-invocation --region $Region --command-id $commandId --instance-id $instanceId --query `"StandardErrorContent`" --output text"
     throw "Remote benchmark command status: $status`n$stderr"
   }
+
+  $ssmSnapDir = Join-Path $LocalOutDir 'ssm_snapshot'
+  Save-SsmInvocationSnapshot -CommandId $commandId -InstanceId $instanceId -RegionName $Region -DestDir $ssmSnapDir
 
   Write-Host "Fetching artifact location..." -ForegroundColor Cyan
   $s3Path = Invoke-AwsText "s3 cp s3://$ArtifactBucket/$remotePrefix/s3_path.txt -"
@@ -319,19 +356,61 @@ try {
   cmd /c "aws s3 cp $s3Path `"$LocalOutDir`" --recursive --region $Region"
   if ($LASTEXITCODE -ne 0) { throw "Failed to download artifacts from $s3Path." }
 
+  $csvPath = Get-ChildItem -LiteralPath $LocalOutDir -Recurse -Filter 'benchmark_v2_results.csv' -ErrorAction SilentlyContinue |
+    Select-Object -First 1 -ExpandProperty FullName
+  if (-not $csvPath -or -not (Test-Path -LiteralPath $csvPath)) {
+    throw @"
+Orchestrator failed: benchmark_v2_results.csv not found under $LocalOutDir after S3 download.
+The remote run must produce CSV under v2_runs_* and upload it. Inspect ssm_snapshot/ and S3: $s3Path
+"@
+  }
+
+  $fullLogSrc = Get-ChildItem -LiteralPath $LocalOutDir -Recurse -Filter 'orchestrator_console.log' -ErrorAction SilentlyContinue |
+    Select-Object -First 1 -ExpandProperty FullName
+  if ($fullLogSrc -and (Test-Path -LiteralPath $fullLogSrc)) {
+    Copy-Item -LiteralPath $fullLogSrc -Destination (Join-Path $LocalOutDir 'orchestrator_console.log') -Force
+  }
+
+  Write-ArtifactManifest -RootDir $LocalOutDir -S3Uri $s3Path
+
   Write-Host "Cloud benchmark completed successfully." -ForegroundColor Green
   Write-Host "Artifacts (local): $LocalOutDir" -ForegroundColor Green
   Write-Host "Artifacts (S3):    $s3Path" -ForegroundColor Green
+  Write-Host "Manifest:          $(Join-Path $LocalOutDir 'MANIFEST.txt')" -ForegroundColor Green
 
-  $csvPath = Get-ChildItem -LiteralPath $LocalOutDir -Recurse -Filter 'benchmark_v2_results.csv' -ErrorAction SilentlyContinue |
+  $summaryPath = Get-ChildItem -LiteralPath $LocalOutDir -Recurse -Filter 'benchmark_v2_summary.txt' -ErrorAction SilentlyContinue |
     Select-Object -First 1 -ExpandProperty FullName
-  if ($csvPath -and (Test-Path -LiteralPath $csvPath)) {
-    Write-Host ""
-    Write-Host "=== benchmark_v2_results.csv (summary) ===" -ForegroundColor Cyan
-    Import-Csv -LiteralPath $csvPath | Format-Table -AutoSize
-    Write-Host "Full CSV path: $csvPath" -ForegroundColor DarkGray
+
+  $resultsTxt = Join-Path $LocalOutDir 'RESULTS.txt'
+  Write-Host ''
+  Write-Host '================================================================' -ForegroundColor Cyan
+  Write-Host '  BENCHMARK V2 — RESULTS' -ForegroundColor Cyan
+  Write-Host '================================================================' -ForegroundColor Cyan
+
+  if ($summaryPath -and (Test-Path -LiteralPath $summaryPath)) {
+    $summaryBody = Get-Content -LiteralPath $summaryPath -Raw
+    Write-Host $summaryBody
+    $summaryBody | Set-Content -Encoding utf8 $resultsTxt
+    Write-Host "RESULTS.txt (copy of summary): $resultsTxt" -ForegroundColor DarkGray
   } else {
-    Write-Host "Note: benchmark_v2_results.csv not found under $LocalOutDir (check logs subfolder)." -ForegroundColor Yellow
+    $rows = Import-Csv -LiteralPath $csvPath
+    $display = $rows | ForEach-Object {
+      [PSCustomObject]@{
+        backend           = $_.backend
+        num_servers       = $_.num_servers
+        ceiling_players   = if ([string]::IsNullOrWhiteSpace([string]$_.ceiling_players)) { '(none)' } else { $_.ceiling_players }
+      }
+    }
+    $text = ($display | Format-Table -AutoSize | Out-String).TrimEnd()
+    Write-Host $text
+    @(
+      'Arcane Benchmark v2 — player ceilings'
+      ''
+      $text
+      ''
+      "CSV: $csvPath"
+    ) -join "`n" | Set-Content -Encoding utf8 $resultsTxt
+    Write-Host "RESULTS.txt (from CSV): $resultsTxt" -ForegroundColor DarkGray
   }
 }
 finally {

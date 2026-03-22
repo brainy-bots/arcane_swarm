@@ -121,7 +121,7 @@ function Invoke-Compose([string]$ComposeArgs) {
   foreach ($w in ($ComposeArgs.Trim() -split '\s+')) {
     if ($w.Length -gt 0) { $tok.Add($w) }
   }
-  & docker @($tok.ToArray())
+  $null = Invoke-NativeForOutput { & docker @($tok.ToArray()) 2>&1 }
   if ($LASTEXITCODE -ne 0) { throw "docker compose failed: $ComposeArgs" }
 }
 
@@ -171,6 +171,49 @@ function Write-EnvForManager([string]$ManagerClusters) {
   $lines | Set-Content $envFile
 }
 
+function Remove-DockerContainerQuiet([string]$Name) {
+  # `docker rm` prints "No such container" to stderr; with $ErrorActionPreference = 'Stop' that would terminate the script.
+  $prev = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'SilentlyContinue'
+    & docker rm -f $Name *> $null
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+}
+
+# Cargo/spacetime and many CLIs write progress to stderr; PowerShell treats that as a terminating error when preference is Stop.
+function Invoke-NativeForOutput([scriptblock]$Command) {
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'SilentlyContinue'
+  try {
+    return & $Command
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+}
+
+# Capture docker compose (swarm) stdout+stderr without dropping lines (SilentlyContinue swallows native stderr lines).
+function Invoke-DockerComposeSwarmCapture([string[]]$SwarmArgs) {
+  $tok = [System.Collections.Generic.List[string]]::new()
+  $tok.Add('compose')
+  $tok.Add('-f'); $tok.Add($compose)
+  $tok.Add('--env-file'); $tok.Add($envFile)
+  $tok.Add('run'); $tok.Add('--rm'); $tok.Add('--no-deps')
+  $tok.Add('--entrypoint'); $tok.Add('arcane-swarm'); $tok.Add('swarm')
+  foreach ($a in $SwarmArgs) { $tok.Add($a) }
+  $saved = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $chunks = & docker @($tok.ToArray()) 2>&1
+    return ($chunks | ForEach-Object {
+      if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { "$_" }
+    }) -join "`n"
+  } finally {
+    $ErrorActionPreference = $saved
+  }
+}
+
 function Start-ClusterContainers([string[]]$Ids, [int]$NumServers, [string]$InfraImage) {
   $names = @()
   for($i=0; $i -lt $NumServers; $i++) {
@@ -180,7 +223,7 @@ function Start-ClusterContainers([string[]]$Ids, [int]$NumServers, [string]$Infr
       if ($j -ne $i) { $neighbors += $Ids[$j] }
     }
     $neighborStr = ($neighbors -join ',')
-    docker rm -f $name 2>$null | Out-Null
+    Remove-DockerContainerQuiet $name
     & docker run -d --name $name --network arcane-v2-net --cpus 1 --memory 2g `
       -e "CLUSTER_ID=$($Ids[$i])" -e "CLUSTER_WS_PORT=$([int](8090+$i))" -e 'REDIS_URL=redis://redis:6379' -e "NEIGHBOR_IDS=$neighborStr" `
       $InfraImage arcane-cluster
@@ -192,13 +235,13 @@ function Start-ClusterContainers([string[]]$Ids, [int]$NumServers, [string]$Infr
 
 function Stop-ClusterContainers([string[]]$Names) {
   foreach($n in $Names) {
-    docker rm -f $n 2>$null | Out-Null
+    Remove-DockerContainerQuiet $n
   }
 }
 
 function Capture-Stats([string]$ScenarioTag, [int]$Players, [int]$NumServers) {
   $outPath = Join-Path $metricsDir "docker_stats.csv"
-  $line = docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}},{{.NetIO}},{{.BlockIO}}' 2>&1
+  $line = Invoke-NativeForOutput { & docker stats --no-stream --format '{{.Name}},{{.CPUPerc}},{{.MemUsage}},{{.NetIO}},{{.BlockIO}}' 2>&1 }
   $ts = (Get-Date).ToString('o')
   foreach($row in $line) {
     if ([string]::IsNullOrWhiteSpace($row)) { continue }
@@ -210,7 +253,7 @@ function Dump-Logs([string]$ScenarioTag, [string[]]$ClusterNames) {
   $base = @('arcane-v2-redis','arcane-v2-manager') + $ClusterNames
   foreach($c in $base) {
     $p = Join-Path $logsDir ("$ScenarioTag`_$c.log")
-    docker logs $c 2>&1 | Set-Content $p
+    Invoke-NativeForOutput { & docker logs $c 2>&1 } | Set-Content $p
   }
 }
 
@@ -240,10 +283,10 @@ try {
 
   # publish module from host CLI to host SpacetimeDB
   Push-Location $modulePath
-  spacetime build 2>&1
+  $null = Invoke-NativeForOutput { & spacetime build 2>&1 }
   if ($LASTEXITCODE -ne 0) { throw 'spacetime build failed' }
   # -s avoids default cloud login prompts on CI/Linux (non-interactive).
-  spacetime publish $DatabaseName -y --server $SpacetimePublishServer 2>&1
+  $null = Invoke-NativeForOutput { & spacetime publish $DatabaseName -y --server $SpacetimePublishServer 2>&1 }
   if ($LASTEXITCODE -ne 0) { throw 'spacetime publish failed' }
   Pop-Location
 
@@ -253,11 +296,12 @@ try {
   $ceil = $null
   for($p=$StartPlayers; $p -le $MaxPlayers; $p += $StepPlayers){
     Write-Host "[v2 spacetimedb] players=$p" -ForegroundColor Gray
-    $out = & docker compose -f $compose --env-file $envFile run --rm --no-deps --entrypoint arcane-swarm swarm `
-      --backend spacetimedb --server-physics --players $p --tick-rate 10 --aps 2 --read-rate 5 --mode spread `
-      --duration $DurationSeconds --uri $SpacetimeHost --db $DatabaseName 2>&1
-    ($out | Out-String) | Set-Content (Join-Path $logsDir ("spacetimedb_only_swarm_players_$p.log"))
-    $parsed = Get-SwarmFinal ($out | Out-String)
+    $out = Invoke-DockerComposeSwarmCapture @(
+      '--backend', 'spacetimedb', '--server-physics', '--players', "$p", '--tick-rate', '10', '--aps', '2', '--read-rate', '5', '--mode', 'spread',
+      '--duration', "$DurationSeconds", '--uri', $SpacetimeHost, '--db', $DatabaseName
+    )
+    $out | Set-Content -Encoding utf8 (Join-Path $logsDir ("spacetimedb_only_swarm_players_$p.log"))
+    $parsed = Get-SwarmFinal $out
     Capture-Stats -ScenarioTag 'spacetimedb_only' -Players $p -NumServers 0
     if (Test-Pass $parsed) { $ceil = $p } else { break }
   }
@@ -277,11 +321,12 @@ try {
     $ceilA = $null
     for($p=$StartPlayers; $p -le $MaxPlayers; $p += $StepPlayers){
       Write-Host "[v2 arcane n=$n] players=$p" -ForegroundColor Gray
-      $out = & docker compose -f $compose --env-file $envFile run --rm --no-deps --entrypoint arcane-swarm swarm `
-        --backend arcane --players $p --tick-rate 10 --aps 2 --read-rate 5 --mode spread --duration $DurationSeconds `
-        --arcane-manager http://manager:8081 --uri $SpacetimeHost --db $DatabaseName 2>&1
-      ($out | Out-String) | Set-Content (Join-Path $logsDir ("arcane_n${n}_swarm_players_$p.log"))
-      $parsed = Get-SwarmFinal ($out | Out-String)
+      $out = Invoke-DockerComposeSwarmCapture @(
+        '--backend', 'arcane', '--players', "$p", '--tick-rate', '10', '--aps', '2', '--read-rate', '5', '--mode', 'spread',
+        '--duration', "$DurationSeconds", '--arcane-manager', 'http://manager:8081', '--uri', $SpacetimeHost, '--db', $DatabaseName
+      )
+      $out | Set-Content -Encoding utf8 (Join-Path $logsDir ("arcane_n${n}_swarm_players_$p.log"))
+      $parsed = Get-SwarmFinal $out
       Capture-Stats -ScenarioTag 'arcane_plus_spacetimedb' -Players $p -NumServers $n
       if (Test-Pass $parsed) { $ceilA = $p } else { break }
     }
@@ -294,10 +339,29 @@ try {
   $csv = Join-Path $OutDir 'benchmark_v2_results.csv'
   $results | Export-Csv -NoTypeInformation -Path $csv
   Write-Host "v2 results written: $csv" -ForegroundColor Green
+
+  # Plain-text summary for S3 / email / README paste (cloud runner prints this after download).
+  $summaryPath = Join-Path $OutDir 'benchmark_v2_summary.txt'
+  $tableText = ($results | Select-Object `
+      @{ Name = 'backend'; Expression = { $_.backend } },
+      @{ Name = 'num_servers'; Expression = { $_.num_servers } },
+      @{ Name = 'ceiling_players'; Expression = { if ($null -eq $_.ceiling_players) { '(none)' } else { $_.ceiling_players } } } |
+    Format-Table -AutoSize | Out-String).TrimEnd()
+  @(
+    'Arcane Benchmark v2 — player ceilings'
+    "Pass: error rate < $([math]::Round($MaxErrRate * 100, 2))%, avg latency < ${MaxLatencyMs} ms"
+    "Output: $OutDir"
+    "Generated (UTC): $((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss'))"
+    ''
+    $tableText
+    ''
+  ) -join "`n" | Set-Content -Encoding utf8 $summaryPath
+  Write-Host "v2 summary written: $summaryPath" -ForegroundColor DarkGray
+
   $results | Format-Table -AutoSize
 }
 finally {
   Stop-DockerStatsLogTimer
   try { Invoke-Compose 'down --remove-orphans' } catch {}
-  for($i=0; $i -lt 12; $i++){ docker rm -f "arcane-v2-cluster-$i" 2>$null | Out-Null }
+  for($i=0; $i -lt 12; $i++){ Remove-DockerContainerQuiet "arcane-v2-cluster-$i" }
 }
