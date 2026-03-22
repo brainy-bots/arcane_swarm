@@ -207,9 +207,13 @@ try {
     "echo `"deb [arch=`$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu `$(. /etc/os-release && echo `$VERSION_CODENAME) stable`" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null",
     "sudo apt-get update",
     "sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
+    # Host `spacetime build` (Run-Benchmark-V2.ps1) needs Rust + wasm32 target on the instance.
+    "sudo apt-get install -y build-essential pkg-config libssl-dev",
     "curl -sSf https://install.spacetimedb.com | sh -s -- -y",
+    "curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable",
     # Do not source ~/.bashrc under SSM: document runs as /bin/sh (dash); bashrc uses bash-only builtins (shopt).
-    'export PATH="/root/.local/bin:/root/.spacetime/bin:$PATH"',
+    'export PATH="/root/.cargo/bin:/root/.local/bin:/root/.spacetime/bin:$PATH"',
+    "rustup target add wasm32-unknown-unknown",
     "curl -L -o /tmp/powershell.deb https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/powershell_7.4.6-1.deb_amd64.deb",
     "sudo dpkg -i /tmp/powershell.deb || sudo apt-get -f install -y",
     "rm -f /tmp/powershell.deb"
@@ -221,6 +225,7 @@ try {
     "export AWS_DEFAULT_REGION=$Region",
     "export ARCANE_INFRA_IMAGE='$ArcaneInfraImage'",
     "export ARCANE_SWARM_IMAGE='$ArcaneSwarmImage'",
+    'export PATH="/root/.cargo/bin:/root/.local/bin:/root/.spacetime/bin:$PATH"',
     # Note: remote runner is /bin/sh — do not use PowerShell @( ) here; pass comma-separated ints to pwsh.
     "pwsh -NoLogo -NoProfile -File ./Run-Benchmark-V2.ps1 -UsePublishedImages -StartPlayers $StartPlayers -StepPlayers $StepPlayers -MaxPlayers $MaxPlayers -DurationSeconds $DurationSeconds -ArcaneClusterCounts $clusterCsv",
     'LATEST_DIR=$(ls -dt v2_runs_* | head -n 1)',
