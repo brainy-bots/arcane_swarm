@@ -102,7 +102,8 @@ function Wait-ForSsmCommand([string]$CommandId, [string]$InstanceId, [int]$PollS
   $lastErrLen = 0
   $sw = [System.Diagnostics.Stopwatch]::StartNew()
   while ($true) {
-    $raw = & aws ssm get-command-invocation --region $Region --command-id $CommandId --instance-id $InstanceId --output json 2>$null
+    # Use cmd /c so AWS CLI stderr (warnings) does not surface as terminating NativeCommandError under $ErrorActionPreference = 'Stop'.
+    $raw = cmd /c "aws ssm get-command-invocation --region $Region --command-id $CommandId --instance-id $InstanceId --output json 2>nul"
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
       Start-Sleep -Seconds $PollSeconds
       continue
@@ -283,7 +284,7 @@ try {
   $ssmParamsOnly = @{ commands = $remoteCommands }
   [System.IO.File]::WriteAllText($ssmParamsPath, ($ssmParamsOnly | ConvertTo-Json -Depth 12), $utf8NoBom2)
   $ssmParamsUri = Get-AwsFileUri -Path $ssmParamsPath
-  $commandId = (& aws ssm send-command --region $Region --instance-ids $instanceId --document-name AWS-RunShellScript --comment 'Arcane benchmark v2 cloud run' --parameters $ssmParamsUri --output json --query 'Command.CommandId' --output text).Trim()
+  $commandId = (cmd /c "aws ssm send-command --region $Region --instance-ids $instanceId --document-name AWS-RunShellScript --comment Arcane-benchmark-v2 --timeout-seconds 7200 --parameters $ssmParamsUri --output json --query Command.CommandId --output text").Trim()
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commandId) -or $commandId -eq 'None') { throw "Failed to start SSM send-command (parameters file)." }
 
   Write-Host "Running benchmark remotely (streaming SSM output when available; this can take a while)..." -ForegroundColor Yellow
