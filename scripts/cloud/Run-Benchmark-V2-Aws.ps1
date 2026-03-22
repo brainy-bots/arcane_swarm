@@ -237,6 +237,7 @@ try {
     # SSM AWS-RunShellScript uses /bin/sh (dash on Ubuntu), not bash — no pipefail.
     "set -eu",
     "export HOME=/root",
+    "echo '=== arcane-cloud: starting bootstrap (apt/base) ==='",
     "export DEBIAN_FRONTEND=noninteractive",
     "echo debconf debconf/frontend select Noninteractive | sudo debconf-set-selections",
     "sudo apt-get update",
@@ -250,6 +251,7 @@ try {
     "echo `"deb [arch=`$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu `$(. /etc/os-release && echo `$VERSION_CODENAME) stable`" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null",
     "sudo apt-get update",
     "sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
+    "echo '=== arcane-cloud: Docker installed; Spacetime + Rust + PowerShell ==='",
     # Host `spacetime build` (Run-Benchmark-V2.ps1) needs Rust + wasm32 target on the instance.
     "sudo apt-get install -y build-essential pkg-config libssl-dev",
     "curl -sSf https://install.spacetimedb.com | sh -s -- -y",
@@ -259,7 +261,8 @@ try {
     "rustup target add wasm32-unknown-unknown",
     "curl -L -o /tmp/powershell.deb https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/powershell_7.4.6-1.deb_amd64.deb",
     "sudo dpkg -i /tmp/powershell.deb || sudo apt-get -f install -y",
-    "rm -f /tmp/powershell.deb"
+    "rm -f /tmp/powershell.deb",
+    "echo '=== arcane-cloud: clone repo + benchmark (docker pulls + spacetime build may take many minutes) ==='"
   ) + $preCloneAuth + @(
     "mkdir -p /opt/bench && cd /opt/bench",
     "git clone --depth 1 --branch $RepoRef $RepoUrl repo",
@@ -269,6 +272,7 @@ try {
     "export ARCANE_INFRA_IMAGE='$ArcaneInfraImage'",
     "export ARCANE_SWARM_IMAGE='$ArcaneSwarmImage'",
     'export PATH="/root/.cargo/bin:/root/.local/bin:/root/.spacetime/bin:$PATH"',
+    "echo '=== arcane-cloud: starting Run-Benchmark-V2.ps1 (compose up, spacetime publish, sweeps) ==='",
     # Note: remote runner is /bin/sh — do not use PowerShell @( ) here; pass comma-separated ints to pwsh.
     "pwsh -NoLogo -NoProfile -File ./Run-Benchmark-V2.ps1 -UsePublishedImages -DockerStatsLogIntervalSec $DockerStatsLogIntervalSec -StartPlayers $StartPlayers -StepPlayers $StepPlayers -MaxPlayers $MaxPlayers -DurationSeconds $DurationSeconds -ArcaneClusterCounts $clusterCsv",
     'LATEST_DIR=$(ls -dt v2_runs_* | head -n 1)',
@@ -287,7 +291,19 @@ try {
   $commandId = (cmd /c "aws ssm send-command --region $Region --instance-ids $instanceId --document-name AWS-RunShellScript --comment Arcane-benchmark-v2 --timeout-seconds 7200 --parameters $ssmParamsUri --output json --query Command.CommandId --output text").Trim()
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commandId) -or $commandId -eq 'None') { throw "Failed to start SSM send-command (parameters file)." }
 
-  Write-Host "Running benchmark remotely (streaming SSM output when available; this can take a while)..." -ForegroundColor Yellow
+  Write-Host "Running benchmark remotely (streaming SSM output when available)..." -ForegroundColor Yellow
+  Write-Host @"
+
+  Cold EC2 run (every invocation is a new instance): expect a long bootstrap before benchmark output.
+    - ~3-10 min: apt, Docker, AWS CLI v2, PowerShell, Rust + wasm32, Spacetime CLI
+    - ~5-20 min: docker pull (clockworklabs/spacetime + redis + your GHCR images; large layers)
+    - ~2-12 min: spacetime build (Rust/WASM compile on the host)
+    - then: actual benchmark (depends on -MaxPlayers / -ArcaneClusterCounts / -DurationSeconds)
+
+  SSM often shows 0 stdout/stderr chars until a phase flushes. Heartbeat lines below mean the command is still running.
+
+"@ -ForegroundColor DarkYellow
+
   $status = Wait-ForSsmCommand -CommandId $commandId -InstanceId $instanceId -PollSeconds $SsmPollSeconds
   if ($status -ne 'Success') {
     $stderr = cmd /c "aws ssm get-command-invocation --region $Region --command-id $commandId --instance-id $instanceId --query `"StandardErrorContent`" --output text"

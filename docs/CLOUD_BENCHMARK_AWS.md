@@ -98,6 +98,18 @@ We intentionally **do not** fire-and-forget: reproducibility runs need a clear p
 - `-SsmPollSeconds` (how often to pull remote logs / heartbeat)
 - `-DockerStatsLogIntervalSec` (remote `docker stats` snapshot period; `0` disables)
 
+## Why the first run feels slow
+
+Each invocation launches a **fresh EC2** and runs a **single long SSM script**. Before the benchmark loop you pay for:
+
+1. **Package installs** — apt, Docker, AWS CLI v2 zip, PowerShell `.deb`, **Rust + `wasm32-unknown-unknown`**, Spacetime CLI.
+2. **Large `docker pull`s** — especially `clockworklabs/spacetime:latest` and Redis (hundreds of MB over the network).
+3. **`spacetime build`** on the instance — compiles your module to WASM (CPU-bound).
+
+**“Minimum” benchmark flags** only shorten the **last** phase; they do **not** skip bootstrap. Expect **roughly 15–35+ minutes** even for a small sweep, depending on region/network and cache. **SSM stdout/stderr often stay empty for long stretches** (buffering); heartbeat lines from the orchestrator mean the remote command is still **InProgress**, not stuck.
+
+To make repeat runs fast, use a **custom AMI** or **pre-baked image** with Docker, Rust, Spacetime, and PowerShell already installed (not automated in this repo yet).
+
 ## Cost and cleanup notes
 
 - The script terminates the EC2 instance and removes temporary IAM/SG resources by default.
