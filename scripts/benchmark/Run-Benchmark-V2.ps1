@@ -21,6 +21,8 @@ param(
   [string]$DatabaseName = 'arcane',
   # Reachable *from containers*; the v2 runner starts SpacetimeDB in Docker.
   [string]$SpacetimeHost = 'http://spacetimedb:3000',
+  # Host CLI `spacetime publish` target (mapped Docker port).
+  [string]$SpacetimePublishServer = 'http://127.0.0.1:3000',
   [string]$OutDir = '',
 
   # Use docker-compose.v2.repro.yml + pull published images (no `docker build` of Arcane/swarm).
@@ -209,7 +211,8 @@ try {
   Push-Location $modulePath
   spacetime build 2>&1
   if ($LASTEXITCODE -ne 0) { throw 'spacetime build failed' }
-  spacetime publish $DatabaseName --yes 2>&1
+  # -s avoids default cloud login prompts on CI/Linux (non-interactive).
+  spacetime publish $DatabaseName -y --server $SpacetimePublishServer 2>&1
   if ($LASTEXITCODE -ne 0) { throw 'spacetime publish failed' }
   Pop-Location
 
