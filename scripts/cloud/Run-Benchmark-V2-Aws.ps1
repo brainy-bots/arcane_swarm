@@ -41,6 +41,12 @@ param(
   # Only if RepoUrl is a private GitHub repo (clone). Use read-only PAT or `gh auth token` in GITHUB_TOKEN.
   [string]$GitHubToken = '',
 
+  # While SSM runs the remote script: poll for new stdout/stderr (AWS may buffer; see docs).
+  [int]$SsmPollSeconds = 12,
+
+  # Passed to Run-Benchmark-V2.ps1: print `docker stats` snapshots every N seconds (0 = off).
+  [int]$DockerStatsLogIntervalSec = 90,
+
   [switch]$KeepInstance,
   [switch]$KeepIamResources
 )
@@ -91,15 +97,51 @@ function Wait-ForSsmOnline([string]$InstanceId) {
   throw "Instance $InstanceId did not become SSM Online in time."
 }
 
-function Wait-ForSsmCommand([string]$CommandId, [string]$InstanceId) {
+function Wait-ForSsmCommand([string]$CommandId, [string]$InstanceId, [int]$PollSeconds) {
+  $lastOutLen = 0
+  $lastErrLen = 0
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
   while ($true) {
-    $status = cmd /c "aws ssm get-command-invocation --region $Region --command-id $CommandId --instance-id $InstanceId --query `"Status`" --output text"
-    if ($LASTEXITCODE -ne 0) {
-      Start-Sleep -Seconds 5
+    $raw = & aws ssm get-command-invocation --region $Region --command-id $CommandId --instance-id $InstanceId --output json 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
+      Start-Sleep -Seconds $PollSeconds
       continue
     }
-    if ($status -in @('Success','Cancelled','TimedOut','Failed','Cancelling')) { return $status.Trim() }
-    Start-Sleep -Seconds 10
+    try {
+      $inv = $raw | ConvertFrom-Json
+    } catch {
+      Start-Sleep -Seconds $PollSeconds
+      continue
+    }
+    $status = $inv.Status
+    $out = [string]$inv.StandardOutputContent
+    $err = [string]$inv.StandardErrorContent
+
+    if ($out.Length -gt $lastOutLen) {
+      Write-Host $out.Substring($lastOutLen) -NoNewline
+      $lastOutLen = $out.Length
+    }
+    if ($err.Length -gt $lastErrLen) {
+      Write-Host $err.Substring($lastErrLen) -NoNewline -ForegroundColor Yellow
+      $lastErrLen = $err.Length
+    }
+
+    if ($status -in @('Success','Cancelled','TimedOut','Failed','Cancelling')) {
+      # Final flush (same poll often includes last bytes)
+      if ($out.Length -gt $lastOutLen) {
+        Write-Host $out.Substring($lastOutLen) -NoNewline
+      }
+      if ($err.Length -gt $lastErrLen) {
+        Write-Host $err.Substring($lastErrLen) -NoNewline -ForegroundColor Yellow
+      }
+      return $status.Trim()
+    }
+
+    $m = [int][math]::Floor($sw.Elapsed.TotalMinutes)
+    $s = [int]($sw.Elapsed.TotalSeconds % 60)
+    Write-Host ""
+    Write-Host "[cloud] SSM Status=$status  remote elapsed ${m}m ${s}s  (stdout ${lastOutLen} chars, stderr ${lastErrLen} chars; AWS may buffer until phases complete)" -ForegroundColor DarkGray
+    Start-Sleep -Seconds $PollSeconds
   }
 }
 
@@ -227,7 +269,7 @@ try {
     "export ARCANE_SWARM_IMAGE='$ArcaneSwarmImage'",
     'export PATH="/root/.cargo/bin:/root/.local/bin:/root/.spacetime/bin:$PATH"',
     # Note: remote runner is /bin/sh — do not use PowerShell @( ) here; pass comma-separated ints to pwsh.
-    "pwsh -NoLogo -NoProfile -File ./Run-Benchmark-V2.ps1 -UsePublishedImages -StartPlayers $StartPlayers -StepPlayers $StepPlayers -MaxPlayers $MaxPlayers -DurationSeconds $DurationSeconds -ArcaneClusterCounts $clusterCsv",
+    "pwsh -NoLogo -NoProfile -File ./Run-Benchmark-V2.ps1 -UsePublishedImages -DockerStatsLogIntervalSec $DockerStatsLogIntervalSec -StartPlayers $StartPlayers -StepPlayers $StepPlayers -MaxPlayers $MaxPlayers -DurationSeconds $DurationSeconds -ArcaneClusterCounts $clusterCsv",
     'LATEST_DIR=$(ls -dt v2_runs_* | head -n 1)',
     'if [ -z "$LATEST_DIR" ]; then echo ''No v2 run output found'' >&2; exit 1; fi',
     "aws s3 cp `"./`$LATEST_DIR`" `"s3://$ArtifactBucket/$remotePrefix/`$LATEST_DIR`" --recursive --region $Region",
@@ -244,8 +286,8 @@ try {
   $commandId = (& aws ssm send-command --region $Region --instance-ids $instanceId --document-name AWS-RunShellScript --comment 'Arcane benchmark v2 cloud run' --parameters $ssmParamsUri --output json --query 'Command.CommandId' --output text).Trim()
   if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commandId) -or $commandId -eq 'None') { throw "Failed to start SSM send-command (parameters file)." }
 
-  Write-Host "Running benchmark remotely (this can take a while)..." -ForegroundColor Yellow
-  $status = Wait-ForSsmCommand -CommandId $commandId -InstanceId $instanceId
+  Write-Host "Running benchmark remotely (streaming SSM output when available; this can take a while)..." -ForegroundColor Yellow
+  $status = Wait-ForSsmCommand -CommandId $commandId -InstanceId $instanceId -PollSeconds $SsmPollSeconds
   if ($status -ne 'Success') {
     $stderr = cmd /c "aws ssm get-command-invocation --region $Region --command-id $commandId --instance-id $instanceId --query `"StandardErrorContent`" --output text"
     throw "Remote benchmark command status: $status`n$stderr"
@@ -261,8 +303,19 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "Failed to download artifacts from $s3Path." }
 
   Write-Host "Cloud benchmark completed successfully." -ForegroundColor Green
-  Write-Host "Artifacts: $LocalOutDir" -ForegroundColor Green
-  Write-Host "Remote S3:  $s3Path" -ForegroundColor Green
+  Write-Host "Artifacts (local): $LocalOutDir" -ForegroundColor Green
+  Write-Host "Artifacts (S3):    $s3Path" -ForegroundColor Green
+
+  $csvPath = Get-ChildItem -LiteralPath $LocalOutDir -Recurse -Filter 'benchmark_v2_results.csv' -ErrorAction SilentlyContinue |
+    Select-Object -First 1 -ExpandProperty FullName
+  if ($csvPath -and (Test-Path -LiteralPath $csvPath)) {
+    Write-Host ""
+    Write-Host "=== benchmark_v2_results.csv (summary) ===" -ForegroundColor Cyan
+    Import-Csv -LiteralPath $csvPath | Format-Table -AutoSize
+    Write-Host "Full CSV path: $csvPath" -ForegroundColor DarkGray
+  } else {
+    Write-Host "Note: benchmark_v2_results.csv not found under $LocalOutDir (check logs subfolder)." -ForegroundColor Yellow
+  }
 }
 finally {
   if ($instanceId -and -not $KeepInstance) {

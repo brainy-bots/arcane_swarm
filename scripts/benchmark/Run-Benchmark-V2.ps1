@@ -30,7 +30,10 @@ param(
   [string]$ArcaneInfraImage = '',
   [string]$ArcaneSwarmImage = '',
   # Override compose file (default: v2 build-from-submodule, or v2.repro when -UsePublishedImages).
-  [string]$ComposeFile = ''
+  [string]$ComposeFile = '',
+
+  # While the benchmark runs: print `docker stats --no-stream` every N seconds (0 = off). Useful with AWS SSM log streaming.
+  [int]$DockerStatsLogIntervalSec = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -72,6 +75,32 @@ $metricsDir = Join-Path $OutDir 'metrics'
 $logsDir = Join-Path $OutDir 'logs'
 $null = New-Item -ItemType Directory -Path $metricsDir -Force
 $null = New-Item -ItemType Directory -Path $logsDir -Force
+
+$script:_dsTimer = $null
+
+function Start-DockerStatsLogTimer([int]$Seconds) {
+  if ($Seconds -le 0) { return }
+  $sec = [Math]::Max(5, $Seconds)
+  Stop-DockerStatsLogTimer
+  $script:_dsTimer = New-Object System.Timers.Timer ($sec * 1000)
+  $script:_dsTimer.AutoReset = $true
+  $null = Register-ObjectEvent -InputObject $script:_dsTimer -EventName Elapsed -SourceIdentifier ArcaneBenchDockerStats -Action {
+    Write-Host ''
+    Write-Host "----- docker stats $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -----" -ForegroundColor DarkCyan
+    & docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}" 2>&1 |
+      ForEach-Object { Write-Host $_ }
+  }
+  $script:_dsTimer.Start()
+}
+
+function Stop-DockerStatsLogTimer {
+  if ($null -ne $script:_dsTimer) {
+    $script:_dsTimer.Stop()
+    $script:_dsTimer.Dispose()
+    $script:_dsTimer = $null
+  }
+  Unregister-Event -SourceIdentifier ArcaneBenchDockerStats -ErrorAction SilentlyContinue
+}
 
 function Test-LocalPortOpen([int]$Port) {
   try {
@@ -186,6 +215,8 @@ function Dump-Logs([string]$ScenarioTag, [string[]]$ClusterNames) {
 }
 
 try {
+  Start-DockerStatsLogTimer -Seconds $DockerStatsLogIntervalSec
+
   Write-EnvForManager ''
   if ($UsePublishedImages) {
     Invoke-Compose 'pull manager swarm'
@@ -266,6 +297,7 @@ try {
   $results | Format-Table -AutoSize
 }
 finally {
+  Stop-DockerStatsLogTimer
   try { Invoke-Compose 'down --remove-orphans' } catch {}
   for($i=0; $i -lt 12; $i++){ docker rm -f "arcane-v2-cluster-$i" 2>$null | Out-Null }
 }

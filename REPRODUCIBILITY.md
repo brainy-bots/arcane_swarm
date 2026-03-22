@@ -189,7 +189,7 @@ $env:ARCANE_SWARM_IMAGE = 'ghcr.io/martinjms/arcane-benchmark-swarm:v1.0.0'
 .\Run-Benchmark-V2-Aws.ps1 -ArtifactBucket <your-s3-bucket> -Region us-east-1
 ```
 
-The script provisions temporary AWS resources, runs v2 remotely, downloads outputs locally, and tears everything down by default.
+The script provisions temporary AWS resources, runs v2 remotely, downloads outputs locally, and tears everything down by default. It **waits until the run finishes** (full sweeps can take a long time), then prints a **results table** in the terminal and leaves files under `scripts/cloud/aws_runs_*` and in S3.
 
 Full details: [docs/CLOUD_BENCHMARK_AWS.md](docs/CLOUD_BENCHMARK_AWS.md).
 

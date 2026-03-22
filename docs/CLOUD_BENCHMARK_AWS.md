@@ -68,6 +68,25 @@ Outputs are downloaded under:
 
 - `scripts/cloud/aws_runs_<timestamp>/...`
 
+## How you get results (by design: wait, then see everything)
+
+The cloud script is **synchronous**: it blocks until the remote benchmark finishes (often **30+ minutes** for a full sweep), then:
+
+1. **Exit code** — `0` means the remote run and S3 upload/download succeeded; non-zero means inspect the error text.
+2. **Terminal** — After download, it prints **`benchmark_v2_results.csv` as a table** so you see ceilings without opening a file first.
+3. **Local folder** — Full run tree: CSV, `logs/`, `metrics/`, `.env.v2` under `aws_runs_<timestamp>/`.
+4. **S3** — The same files stay in your bucket under `arcane-benchmarks/v2/...` so you can share a prefix with collaborators or re-download with `aws s3 cp`.
+
+We intentionally **do not** fire-and-forget: reproducibility runs need a clear pass/fail and artifacts on disk. If you need **async** runs (e.g. start from CI and pick results up later), use the same S3 prefix pattern or add your own workflow that only polls S3.
+
+**Local** `Run-Benchmark-V2.ps1` already waits and prints a table at the end; results are under `scripts/benchmark/v2_runs_<timestamp>/`.
+
+### Progress and container resources (while the run is in flight)
+
+- The orchestrator **polls SSM** every `-SsmPollSeconds` (default 12) and prints **any new** `StandardOutputContent` / `StandardErrorContent` from the instance. You also get a **heartbeat** line with SSM status and elapsed time.
+- **Caveat:** AWS often **buffers** remote script output until a subprocess exits or a line-buffer boundary, so you may see **bursts** rather than smooth streaming. For guaranteed live tailing you’d enable **CloudWatch Logs** on `send-command` and `aws logs tail` in another terminal (not wired in this script yet).
+- On the instance, `Run-Benchmark-V2.ps1` is called with **`-DockerStatsLogIntervalSec`** (default **90** on the cloud script). That prints periodic **`docker stats`** tables (CPU, memory, net I/O per container) into the same remote log, so they show up in your terminal when SSM flushes. Set **`-DockerStatsLogIntervalSec 0`** on `Run-Benchmark-V2-Aws.ps1` to turn that off.
+
 ## Important parameters
 
 - `-ArtifactBucket` (required): S3 bucket for run outputs.
@@ -76,6 +95,8 @@ Outputs are downloaded under:
 - `-RepoUrl` / `-RepoRef` (public benchmark repo; shallow clone, **no submodules**)
 - `-ArcaneInfraImage` / `-ArcaneSwarmImage` (or `ARCANE_INFRA_IMAGE` / `ARCANE_SWARM_IMAGE`)
 - `-StartPlayers`, `-StepPlayers`, `-MaxPlayers`, `-DurationSeconds`, `-ArcaneClusterCounts`
+- `-SsmPollSeconds` (how often to pull remote logs / heartbeat)
+- `-DockerStatsLogIntervalSec` (remote `docker stats` snapshot period; `0` disables)
 
 ## Cost and cleanup notes
 
