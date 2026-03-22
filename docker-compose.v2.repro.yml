@@ -22,7 +22,7 @@ services:
           memory: 1g
 
   spacetimedb:
-    image: ${SPACETIME_IMAGE:-clockworklabs/spacetime:2.0.5}
+    image: ${SPACETIME_IMAGE:-clockworklabs/spacetime:latest}
     container_name: arcane-v2-spacetimedb
     ports:
       - "3000:3000"
