@@ -2,6 +2,8 @@
 
 This guide runs Benchmark v2 on a temporary AWS EC2 host and pulls results back locally.
 
+> **What you’ll see in the terminal:** The script **blocks until the run finishes** (often **many minutes** on a cold instance). You’ll get periodic **`[cloud] SSM Status=InProgress…`** heartbeats; **remote log text may arrive in bursts** or look empty for a long time — that’s normal (SSM buffering + install/pull/build). **You do not need the AWS web console** to know it’s working; if the process exits **0**, artifacts and a **results table** are printed at the end. For detail, use **EC2 → Systems Manager → Run Command** only if something fails.
+
 ## Infrastructure layout (script vs Terraform)
 
 | Piece | Tool | Notes |
