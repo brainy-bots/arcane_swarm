@@ -77,6 +77,140 @@ enum SwarmMode { Spread, Clustered }
 #[derive(Clone, Copy, PartialEq)]
 enum Backend { SpacetimeDb, Arcane }
 
+trait BackendRuntime: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn spawn_player(
+        &self,
+        idx: u32,
+        desired_total: u32,
+        tick_interval: Duration,
+        http_client: reqwest::Client,
+        metrics: Arc<Metrics>,
+        read_metrics: Arc<Metrics>,
+        stop: Arc<AtomicBool>,
+        cluster_flag: Arc<AtomicBool>,
+        positions: Arc<backends_spacetimedb::SharedPositions>,
+    ) -> tokio::task::JoinHandle<()>;
+
+    fn spawn_read(
+        &self,
+        idx: u32,
+        http_client: reqwest::Client,
+        read_rate: f64,
+        read_metrics: Arc<Metrics>,
+        stop: Arc<AtomicBool>,
+        positions: Arc<backends_spacetimedb::SharedPositions>,
+    ) -> Option<tokio::task::JoinHandle<()>>;
+}
+
+struct SpacetimeRuntime {
+    url_update_player: String,
+    url_update_player_input: String,
+    url_remove: String,
+    sql_url: String,
+    server_physics: bool,
+}
+
+impl BackendRuntime for SpacetimeRuntime {
+    fn name(&self) -> &'static str { "spacetimedb" }
+
+    fn spawn_player(
+        &self,
+        idx: u32,
+        desired_total: u32,
+        tick_interval: Duration,
+        http_client: reqwest::Client,
+        metrics: Arc<Metrics>,
+        _read_metrics: Arc<Metrics>,
+        stop: Arc<AtomicBool>,
+        cluster_flag: Arc<AtomicBool>,
+        positions: Arc<backends_spacetimedb::SharedPositions>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(backends_spacetimedb::player_loop_spacetimedb(
+            http_client,
+            self.url_update_player.clone(),
+            self.url_update_player_input.clone(),
+            self.url_remove.clone(),
+            idx,
+            desired_total,
+            tick_interval,
+            metrics,
+            stop,
+            cluster_flag,
+            self.server_physics,
+            positions,
+        ))
+    }
+
+    fn spawn_read(
+        &self,
+        idx: u32,
+        http_client: reqwest::Client,
+        read_rate: f64,
+        read_metrics: Arc<Metrics>,
+        stop: Arc<AtomicBool>,
+        positions: Arc<backends_spacetimedb::SharedPositions>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        if read_rate <= 0.0 {
+            return None;
+        }
+        Some(tokio::spawn(backends_spacetimedb::read_loop_spacetimedb(
+            http_client,
+            self.sql_url.clone(),
+            read_rate,
+            read_metrics,
+            stop,
+            idx,
+            positions,
+        )))
+    }
+}
+
+struct ArcaneRuntime {
+    endpoint: ArcaneEndpoint,
+}
+
+impl BackendRuntime for ArcaneRuntime {
+    fn name(&self) -> &'static str { "arcane" }
+
+    fn spawn_player(
+        &self,
+        idx: u32,
+        desired_total: u32,
+        tick_interval: Duration,
+        http_client: reqwest::Client,
+        metrics: Arc<Metrics>,
+        read_metrics: Arc<Metrics>,
+        stop: Arc<AtomicBool>,
+        cluster_flag: Arc<AtomicBool>,
+        _positions: Arc<backends_spacetimedb::SharedPositions>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(backends_arcane::player_loop_arcane(
+            self.endpoint.clone(),
+            http_client,
+            idx,
+            desired_total,
+            tick_interval,
+            metrics,
+            read_metrics,
+            stop,
+            cluster_flag,
+        ))
+    }
+
+    fn spawn_read(
+        &self,
+        _idx: u32,
+        _http_client: reqwest::Client,
+        _read_rate: f64,
+        _read_metrics: Arc<Metrics>,
+        _stop: Arc<AtomicBool>,
+        _positions: Arc<backends_spacetimedb::SharedPositions>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        None
+    }
+}
+
 fn parse_args() -> Config {
     let mut players: u32 = 100;
     let mut max_players: u32 = 0;
@@ -405,7 +539,26 @@ async fn run_reporter(
 }
 
 async fn run_control_mode(cfg: Config, tick_interval: Duration) {
-    let backend_name = if cfg.backend == Backend::Arcane { "arcane" } else { "spacetimedb" };
+    let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
+    let base = format!("{}/v1/database/{}/call", stdb_base, cfg.database);
+    let sql_url = format!("{}/v1/database/{}/sql", stdb_base, cfg.database);
+    let backend_runtime: Arc<dyn BackendRuntime> = match cfg.backend {
+        Backend::SpacetimeDb => Arc::new(SpacetimeRuntime {
+            url_update_player: format!("{}/update_player", base),
+            url_update_player_input: format!("{}/update_player_input", base),
+            url_remove: format!("{}/remove_player", base),
+            sql_url: sql_url.clone(),
+            server_physics: cfg.server_physics,
+        }),
+        Backend::Arcane => {
+            let endpoint = match &cfg.arcane_manager {
+                Some(base) => ArcaneEndpoint::ManagerJoin { base_url: base.clone() },
+                None => ArcaneEndpoint::SingleUrl(cfg.arcane_ws.clone()),
+            };
+            Arc::new(ArcaneRuntime { endpoint })
+        }
+    };
+    let backend_name = backend_runtime.name();
     eprintln!(
         "arcane-swarm(control): initial_players={}, max_players={}, tick_rate={}, mode={}, backend={}, server_physics={}, actions/s={:.1}, read_rate={:.1}Hz control_port={}",
         cfg.players,
@@ -433,9 +586,6 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
 
     let all_ids: Arc<Vec<uuid::Uuid>> = Arc::new((0..max_players).map(|_| uuid::Uuid::new_v4()).collect());
 
-    let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
-    let base = format!("{}/v1/database/{}/call", stdb_base, cfg.database);
-    let sql_url = format!("{}/v1/database/{}/sql", stdb_base, cfg.database);
     let action_urls = backends_spacetimedb::ActionUrls {
         pickup: format!("{}/pickup_item", base),
         use_item: format!("{}/use_item", base),
@@ -450,11 +600,6 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
 
     let positions = Arc::new(backends_spacetimedb::SharedPositions::new(max_players));
     let cluster_flag = cfg.cluster_command.clone();
-
-    let arcane_endpoint = match &cfg.arcane_manager {
-        Some(base) => ArcaneEndpoint::ManagerJoin { base_url: base.clone() },
-        None => ArcaneEndpoint::SingleUrl(cfg.arcane_ws.clone()),
-    };
 
     // Precreate per-player stop flags so control tasks can stop everyone without synchronization.
     let player_stop_flags: Arc<Vec<Arc<AtomicBool>>> = Arc::new(
@@ -487,61 +632,30 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                          action_metrics: &Arc<Metrics>,
                          read_metrics: &Arc<Metrics>,
                          positions: &Arc<backends_spacetimedb::SharedPositions>,
-                         cluster_flag: &Arc<AtomicBool>| {
+                         cluster_flag: &Arc<AtomicBool>,
+                         backend_runtime: &Arc<dyn BackendRuntime>| {
         player_stop_flags[idx].store(false, Ordering::Relaxed);
         let stop = player_stop_flags[idx].clone();
-        match cfg.backend {
-            Backend::SpacetimeDb => {
-                // SpacetimeDB player + optional read loop.
-                let server_physics = cfg.server_physics;
-                let url_update_player = format!("{}/update_player", base);
-                let url_update_player_input = format!("{}/update_player_input", base);
-                let url_remove = format!("{}/remove_player", base);
-                let fut = backends_spacetimedb::player_loop_spacetimedb(
-                    http_client.clone(),
-                    url_update_player,
-                    url_update_player_input,
-                    url_remove,
-                    idx as u32,
-                    desired_total,
-                    tick_interval,
-                    metrics.clone(),
-                    stop.clone(),
-                    cluster_flag.clone(),
-                    server_physics,
-                    positions.clone(),
-                );
-                handles[idx] = Some(tokio::spawn(fut));
-
-                if cfg.read_rate > 0.0 {
-                    let read_fut = backends_spacetimedb::read_loop_spacetimedb(
-                        http_client.clone(),
-                        sql_url.clone(),
-                        cfg.read_rate,
-                        read_metrics.clone(),
-                        stop.clone(),
-                        idx as u32,
-                        positions.clone(),
-                    );
-                    // Use separate slot for read loop by reusing the same player slot is safe; it will stop with `stop`.
-                    // We don't store the handle for the read loop to keep the supervisor logic simpler.
-                    tokio::spawn(read_fut);
-                }
-            }
-            Backend::Arcane => {
-                let fut = backends_arcane::player_loop_arcane(
-                    arcane_endpoint.clone(),
-                    http_client.clone(),
-                    idx as u32,
-                    desired_total,
-                    tick_interval,
-                    metrics.clone(),
-                    read_metrics.clone(),
-                    stop.clone(),
-                    cluster_flag.clone(),
-                );
-                handles[idx] = Some(tokio::spawn(fut));
-            }
+        handles[idx] = Some(backend_runtime.spawn_player(
+            idx as u32,
+            desired_total,
+            tick_interval,
+            http_client.clone(),
+            metrics.clone(),
+            read_metrics.clone(),
+            stop.clone(),
+            cluster_flag.clone(),
+            positions.clone(),
+        ));
+        if let Some(_read_handle) = backend_runtime.spawn_read(
+            idx as u32,
+            http_client.clone(),
+            cfg.read_rate,
+            read_metrics.clone(),
+            stop.clone(),
+            positions.clone(),
+        ) {
+            // Read task is intentionally detached.
         }
 
         // Optional actions per player.
@@ -583,6 +697,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
             &read_metrics,
             &positions,
             &cluster_flag,
+            &backend_runtime,
         );
         current_spawned += 1;
     }
@@ -648,6 +763,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                     &read_metrics,
                     &positions,
                     &cluster_flag,
+                    &backend_runtime,
                 );
             }
             current_spawned = target;
@@ -743,7 +859,26 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
 async fn main() {
     let cfg = parse_args();
     let tick_interval = Duration::from_micros(1_000_000 / cfg.tick_rate as u64);
-    let backend_name = if cfg.backend == Backend::Arcane { "arcane" } else { "spacetimedb" };
+    let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
+    let base = format!("{}/v1/database/{}/call", stdb_base, cfg.database);
+    let sql_url = format!("{}/v1/database/{}/sql", stdb_base, cfg.database);
+    let backend_runtime: Arc<dyn BackendRuntime> = match cfg.backend {
+        Backend::SpacetimeDb => Arc::new(SpacetimeRuntime {
+            url_update_player: format!("{}/update_player", base),
+            url_update_player_input: format!("{}/update_player_input", base),
+            url_remove: format!("{}/remove_player", base),
+            sql_url: sql_url.clone(),
+            server_physics: cfg.server_physics,
+        }),
+        Backend::Arcane => {
+            let endpoint = match &cfg.arcane_manager {
+                Some(base) => ArcaneEndpoint::ManagerJoin { base_url: base.clone() },
+                None => ArcaneEndpoint::SingleUrl(cfg.arcane_ws.clone()),
+            };
+            Arc::new(ArcaneRuntime { endpoint })
+        }
+    };
+    let backend_name = backend_runtime.name();
 
     if cfg.run_forever || cfg.control_port > 0 {
         run_control_mode(cfg, tick_interval).await;
@@ -765,9 +900,6 @@ async fn main() {
 
     let all_ids: Arc<Vec<uuid::Uuid>> = Arc::new((0..cfg.players).map(|_| uuid::Uuid::new_v4()).collect());
 
-    let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
-    let base = format!("{}/v1/database/{}/call", stdb_base, cfg.database);
-    let sql_url = format!("{}/v1/database/{}/sql", stdb_base, cfg.database);
     let action_urls = backends_spacetimedb::ActionUrls {
         pickup: format!("{}/pickup_item", base),
         use_item: format!("{}/use_item", base),
@@ -782,58 +914,44 @@ async fn main() {
 
     let positions = Arc::new(backends_spacetimedb::SharedPositions::new(cfg.players));
 
-    match cfg.backend {
-        Backend::SpacetimeDb => {
-            let url_update_player = format!("{}/update_player", base);
-            let url_update_player_input = format!("{}/update_player_input", base);
-            let url_remove = format!("{}/remove_player", base);
-            eprintln!("  SpacetimeDB: {}/database/{}", cfg.spacetimedb_uri, cfg.database);
+    if backend_name == "spacetimedb" {
+        eprintln!("  SpacetimeDB: {}/database/{}", cfg.spacetimedb_uri, cfg.database);
+    } else if let Some(base) = &cfg.arcane_manager {
+        eprintln!("  Arcane: manager join at {} (round-robin clusters)", base);
+    } else {
+        eprintln!("  Arcane WS: {} (single cluster)", cfg.arcane_ws);
+    }
 
-            for i in 0..cfg.players {
-                handles.push(tokio::spawn(backends_spacetimedb::player_loop_spacetimedb(
-                    http_client.clone(),
-                    url_update_player.clone(),
-                    url_update_player_input.clone(),
-                    url_remove.clone(),
-                    i, cfg.players, tick_interval,
-                    metrics.clone(), stop.clone(), cfg.cluster_command.clone(),
-                    cfg.server_physics,
-                    positions.clone(),
-                )));
-            }
+    if cfg.read_rate > 0.0 && backend_name == "spacetimedb" {
+        eprintln!(
+            "  Read simulation: spatial queries (radius={}) at {} Hz per player ({} total queries/s)",
+            VISIBILITY_RADIUS,
+            cfg.read_rate,
+            cfg.read_rate as u64 * cfg.players as u64
+        );
+    }
 
-            if cfg.read_rate > 0.0 {
-                eprintln!("  Read simulation: spatial queries (radius={}) at {} Hz per player ({} total queries/s)",
-                    VISIBILITY_RADIUS, cfg.read_rate, cfg.read_rate as u64 * cfg.players as u64);
-                for i in 0..cfg.players {
-                    handles.push(tokio::spawn(backends_spacetimedb::read_loop_spacetimedb(
-                        http_client.clone(), sql_url.clone(),
-                        cfg.read_rate, read_metrics.clone(), stop.clone(), i,
-                        positions.clone(),
-                    )));
-                }
-            }
-        }
-        Backend::Arcane => {
-            let arcane_endpoint = match &cfg.arcane_manager {
-                Some(base) => {
-                    eprintln!("  Arcane: manager join at {} (round-robin clusters)", base);
-                    ArcaneEndpoint::ManagerJoin { base_url: base.clone() }
-                }
-                None => {
-                    eprintln!("  Arcane WS: {} (single cluster)", cfg.arcane_ws);
-                    ArcaneEndpoint::SingleUrl(cfg.arcane_ws.clone())
-                }
-            };
-            for i in 0..cfg.players {
-                handles.push(tokio::spawn(backends_arcane::player_loop_arcane(
-                    arcane_endpoint.clone(),
-                    http_client.clone(),
-                    i, cfg.players, tick_interval,
-                    metrics.clone(), read_metrics.clone(), stop.clone(), cfg.cluster_command.clone(),
-                )));
-            }
-        }
+    for i in 0..cfg.players {
+        handles.push(backend_runtime.spawn_player(
+            i,
+            cfg.players,
+            tick_interval,
+            http_client.clone(),
+            metrics.clone(),
+            read_metrics.clone(),
+            stop.clone(),
+            cfg.cluster_command.clone(),
+            positions.clone(),
+        ));
+
+        let _ = backend_runtime.spawn_read(
+            i,
+            http_client.clone(),
+            cfg.read_rate,
+            read_metrics.clone(),
+            stop.clone(),
+            positions.clone(),
+        );
     }
 
     if cfg.actions_per_sec > 0.0 {
