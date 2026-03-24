@@ -21,9 +21,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time;
 #[path = "arcane_swarm/backends_arcane.rs"]
-mod backends_arcane;
+mod runtime_arcane;
 #[path = "arcane_swarm/backends_spacetimedb.rs"]
-mod backends_spacetimedb;
+mod runtime_spacetime;
 
 const VISIBILITY_RADIUS: f64 = 1500.0;
 
@@ -89,7 +89,7 @@ trait BackendRuntime: Send + Sync {
         read_metrics: Arc<Metrics>,
         stop: Arc<AtomicBool>,
         cluster_flag: Arc<AtomicBool>,
-        positions: Arc<backends_spacetimedb::SharedPositions>,
+        positions: Arc<runtime_spacetime::SharedPositions>,
     ) -> tokio::task::JoinHandle<()>;
 
     fn spawn_read(
@@ -99,7 +99,7 @@ trait BackendRuntime: Send + Sync {
         read_rate: f64,
         read_metrics: Arc<Metrics>,
         stop: Arc<AtomicBool>,
-        positions: Arc<backends_spacetimedb::SharedPositions>,
+        positions: Arc<runtime_spacetime::SharedPositions>,
     ) -> Option<tokio::task::JoinHandle<()>>;
 }
 
@@ -124,9 +124,9 @@ impl BackendRuntime for SpacetimeRuntime {
         _read_metrics: Arc<Metrics>,
         stop: Arc<AtomicBool>,
         cluster_flag: Arc<AtomicBool>,
-        positions: Arc<backends_spacetimedb::SharedPositions>,
+        positions: Arc<runtime_spacetime::SharedPositions>,
     ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(backends_spacetimedb::player_loop_spacetimedb(
+        tokio::spawn(runtime_spacetime::player_loop_spacetimedb(
             http_client,
             self.url_update_player.clone(),
             self.url_update_player_input.clone(),
@@ -149,12 +149,12 @@ impl BackendRuntime for SpacetimeRuntime {
         read_rate: f64,
         read_metrics: Arc<Metrics>,
         stop: Arc<AtomicBool>,
-        positions: Arc<backends_spacetimedb::SharedPositions>,
+        positions: Arc<runtime_spacetime::SharedPositions>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         if read_rate <= 0.0 {
             return None;
         }
-        Some(tokio::spawn(backends_spacetimedb::read_loop_spacetimedb(
+        Some(tokio::spawn(runtime_spacetime::read_loop_spacetimedb(
             http_client,
             self.sql_url.clone(),
             read_rate,
@@ -183,9 +183,9 @@ impl BackendRuntime for ArcaneRuntime {
         read_metrics: Arc<Metrics>,
         stop: Arc<AtomicBool>,
         cluster_flag: Arc<AtomicBool>,
-        _positions: Arc<backends_spacetimedb::SharedPositions>,
+        _positions: Arc<runtime_spacetime::SharedPositions>,
     ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(backends_arcane::player_loop_arcane(
+        tokio::spawn(runtime_arcane::player_loop_arcane(
             self.endpoint.clone(),
             http_client,
             idx,
@@ -205,7 +205,7 @@ impl BackendRuntime for ArcaneRuntime {
         _read_rate: f64,
         _read_metrics: Arc<Metrics>,
         _stop: Arc<AtomicBool>,
-        _positions: Arc<backends_spacetimedb::SharedPositions>,
+        _positions: Arc<runtime_spacetime::SharedPositions>,
     ) -> Option<tokio::task::JoinHandle<()>> {
         None
     }
@@ -472,7 +472,7 @@ async fn run_reporter(
         let a = if has_actions {
             action_metrics.snapshot_and_reset()
         } else {
-            backends_spacetimedb::empty_snapshot()
+            runtime_spacetime::empty_snapshot()
         };
         let a_ops = a.ok + a.err;
         total_action_calls += a.ok + a.err;
@@ -586,7 +586,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
 
     let all_ids: Arc<Vec<uuid::Uuid>> = Arc::new((0..max_players).map(|_| uuid::Uuid::new_v4()).collect());
 
-    let action_urls = backends_spacetimedb::ActionUrls {
+    let action_urls = runtime_spacetime::ActionUrls {
         pickup: format!("{}/pickup_item", base),
         use_item: format!("{}/use_item", base),
         interact: format!("{}/player_interact", base),
@@ -598,7 +598,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         .build()
         .expect("HTTP client");
 
-    let positions = Arc::new(backends_spacetimedb::SharedPositions::new(max_players));
+    let positions = Arc::new(runtime_spacetime::SharedPositions::new(max_players));
     let cluster_flag = cfg.cluster_command.clone();
 
     // Precreate per-player stop flags so control tasks can stop everyone without synchronization.
@@ -631,7 +631,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                          metrics: &Arc<Metrics>,
                          action_metrics: &Arc<Metrics>,
                          read_metrics: &Arc<Metrics>,
-                         positions: &Arc<backends_spacetimedb::SharedPositions>,
+                         positions: &Arc<runtime_spacetime::SharedPositions>,
                          cluster_flag: &Arc<AtomicBool>,
                          backend_runtime: &Arc<dyn BackendRuntime>| {
         player_stop_flags[idx].store(false, Ordering::Relaxed);
@@ -664,9 +664,9 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
             let player_id = all_ids[idx];
             let stop2 = player_stop_flags[idx].clone();
             let total_players = total_players_atomic.clone();
-            let fut = backends_spacetimedb::action_loop(
+            let fut = runtime_spacetime::action_loop(
                 http_client.clone(),
-                backends_spacetimedb::ActionUrls {
+                runtime_spacetime::ActionUrls {
                     pickup: action_urls.pickup.clone(),
                     use_item: action_urls.use_item.clone(),
                     interact: action_urls.interact.clone(),
@@ -900,7 +900,7 @@ async fn main() {
 
     let all_ids: Arc<Vec<uuid::Uuid>> = Arc::new((0..cfg.players).map(|_| uuid::Uuid::new_v4()).collect());
 
-    let action_urls = backends_spacetimedb::ActionUrls {
+    let action_urls = runtime_spacetime::ActionUrls {
         pickup: format!("{}/pickup_item", base),
         use_item: format!("{}/use_item", base),
         interact: format!("{}/player_interact", base),
@@ -912,7 +912,7 @@ async fn main() {
         .build()
         .expect("HTTP client");
 
-    let positions = Arc::new(backends_spacetimedb::SharedPositions::new(cfg.players));
+    let positions = Arc::new(runtime_spacetime::SharedPositions::new(cfg.players));
 
     if backend_name == "spacetimedb" {
         eprintln!("  SpacetimeDB: {}/database/{}", cfg.spacetimedb_uri, cfg.database);
@@ -957,9 +957,9 @@ async fn main() {
     if cfg.actions_per_sec > 0.0 {
         for i in 0..cfg.players {
             let player_id = all_ids[i as usize];
-            handles.push(tokio::spawn(backends_spacetimedb::action_loop(
+            handles.push(tokio::spawn(runtime_spacetime::action_loop(
                 http_client.clone(),
-                backends_spacetimedb::ActionUrls {
+                runtime_spacetime::ActionUrls {
                     pickup: action_urls.pickup.clone(),
                     use_item: action_urls.use_item.clone(),
                     interact: action_urls.interact.clone(),
