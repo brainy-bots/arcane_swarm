@@ -16,10 +16,14 @@
 //! With --arcane-ws: all players connect to one cluster (single server).
 //! With --arcane-manager: each player does GET manager/join; players are spread round-robin across clusters (see docs/ARCANE_BENCHMARK_SETUP.md).
 
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicI64, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time;
+#[path = "arcane_swarm/backends_arcane.rs"]
+mod backends_arcane;
+#[path = "arcane_swarm/backends_spacetimedb.rs"]
+mod backends_spacetimedb;
 
 const VISIBILITY_RADIUS: f64 = 1500.0;
 
@@ -157,56 +161,6 @@ fn parse_args() -> Config {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct ManagerJoinResponse {
-    server_host: String,
-    server_port: u16,
-}
-
-/// Resolve WebSocket URL for one player. If using manager, GET base/join and build ws://host:port.
-async fn resolve_arcane_ws(
-    endpoint: &ArcaneEndpoint,
-    client: &reqwest::Client,
-    player_idx: u32,
-) -> String {
-    match endpoint {
-        ArcaneEndpoint::SingleUrl(url) => url.clone(),
-        ArcaneEndpoint::ManagerJoin { base_url } => {
-            let join_url = format!("{}/join", base_url.trim_end_matches('/'));
-            const RETRIES: u32 = 3;
-            for attempt in 0..RETRIES {
-                match client.get(&join_url).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        if let Ok(join) = resp.json::<ManagerJoinResponse>().await {
-                            return format!("ws://{}:{}", join.server_host, join.server_port);
-                        }
-                    }
-                    Ok(resp) => {
-                        if player_idx == 0 && attempt == RETRIES - 1 {
-                            let status = resp.status();
-                            let t = resp.text().await.unwrap_or_default();
-                            eprintln!("[player 0] manager join HTTP {}: {}", status, &t[..t.len().min(200)]);
-                        }
-                    }
-                    Err(e) => {
-                        if player_idx == 0 && attempt == RETRIES - 1 {
-                            eprintln!("[player 0] manager join error (after {} attempts): {}", RETRIES, e);
-                        }
-                    }
-                }
-                if attempt < RETRIES - 1 {
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                }
-            }
-            // Do not fall back to 8080: our clusters use 8090+. Falling back would send all traffic to one wrong process.
-            if player_idx == 0 {
-                eprintln!("[player 0] manager join failed after {} attempts; using invalid URL so this player fails (fix manager/ports).", RETRIES);
-            }
-            "ws://127.0.0.1:1".to_string()
-        }
-    }
-}
-
 // -- Metrics ---------------------------------------------------------------
 
 struct Metrics {
@@ -269,54 +223,6 @@ struct MetricsSnapshot {
     bytes: u64,
 }
 
-// -- SpacetimeDB JSON helpers ----------------------------------------------
-
-fn uuid_json(id: &uuid::Uuid) -> u128 {
-    u128::from_be_bytes(*id.as_bytes())
-}
-
-fn entity_json(id: &uuid::Uuid, x: f64, y: f64, z: f64, _vx: f64, _vy: f64, _vz: f64) -> String {
-    // HTTP args for update_player(ctx, entity: Entity) — Entity is entity_id + x,y,z only.
-    format!(
-        r#"[{{"entity_id":{{"__uuid__":{}}},"x":{},"y":{},"z":{}}}]"#,
-        uuid_json(id),
-        x,
-        y,
-        z
-    )
-}
-
-fn player_input_json(id: &uuid::Uuid, dir_x: f64, dir_z: f64) -> String {
-    // update_player_input(ctx, entity_id, dir_x, dir_z) — positional JSON array (see pickup_item_json).
-    format!(
-        r#"[{{"__uuid__":{}}},{},{}]"#,
-        uuid_json(id),
-        dir_x,
-        dir_z
-    )
-}
-
-fn pickup_item_json(owner_id: &uuid::Uuid, item_type: u32, quantity: u32) -> String {
-    format!(
-        r#"[{{"__uuid__":{}}},{},{}]"#,
-        uuid_json(owner_id), item_type, quantity
-    )
-}
-
-fn use_item_json(owner_id: &uuid::Uuid, item_type: u32) -> String {
-    format!(
-        r#"[{{"__uuid__":{}}},{}]"#,
-        uuid_json(owner_id), item_type
-    )
-}
-
-fn interact_json(actor_id: &uuid::Uuid, target_id: &uuid::Uuid, event_type: u32) -> String {
-    format!(
-        r#"[{{"__uuid__":{}}},{{"__uuid__":{}}},{}]"#,
-        uuid_json(actor_id), uuid_json(target_id), event_type
-    )
-}
-
 // -- Arcane PLAYER_STATE JSON helper ----------------------------------------
 
 fn player_state_json(id: &uuid::Uuid, x: f64, y: f64, z: f64, vx: f64, vy: f64, vz: f64) -> String {
@@ -324,27 +230,6 @@ fn player_state_json(id: &uuid::Uuid, x: f64, y: f64, z: f64, vx: f64, vy: f64, 
         r#"{{"type":"PLAYER_STATE","entity_id":"{}","position":{{"x":{},"y":{},"z":{}}},"velocity":{{"x":{},"y":{},"z":{}}}}}"#,
         id, x, y, z, vx, vy, vz
     )
-}
-
-// -- Game action types for simulation --------------------------------------
-
-#[derive(Clone, Copy)]
-enum GameAction {
-    PickupItem { item_type: u32, quantity: u32 },
-    UseItem { item_type: u32 },
-    Interact { target_idx: u32, event_type: u32 },
-}
-
-fn random_action(player_idx: u32, total_players: u32, tick: u64) -> GameAction {
-    let seed = (player_idx as u64).wrapping_mul(31) ^ tick.wrapping_mul(7);
-    match seed % 5 {
-        0 => GameAction::PickupItem { item_type: (seed % 20) as u32, quantity: 1 + (seed % 5) as u32 },
-        1 => GameAction::UseItem { item_type: (seed % 20) as u32 },
-        _ => GameAction::Interact {
-            target_idx: ((player_idx + 1 + (seed % total_players.max(2) as u64) as u32) % total_players),
-            event_type: (seed % 4) as u32,
-        },
-    }
 }
 
 // -- Movement --------------------------------------------------------------
@@ -404,299 +289,6 @@ impl Player {
     }
 }
 
-// -- Persistent-action loop (runs alongside movement for both backends) ----
-
-struct ActionUrls {
-    pickup: String,
-    use_item: String,
-    interact: String,
-}
-
-async fn action_loop(
-    client: reqwest::Client,
-    urls: ActionUrls,
-    player_id: uuid::Uuid,
-    player_idx: u32,
-    total_players: Arc<AtomicU32>,
-    all_ids: Arc<Vec<uuid::Uuid>>,
-    actions_per_sec: f64,
-    action_metrics: Arc<Metrics>,
-    stop: Arc<AtomicBool>,
-) {
-    if actions_per_sec <= 0.0 { return; }
-    let interval_us = (1_000_000.0 / actions_per_sec) as u64;
-    let mut interval = time::interval(Duration::from_micros(interval_us));
-    interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-    let mut tick: u64 = 0;
-
-    while !stop.load(Ordering::Relaxed) {
-        interval.tick().await;
-        tick += 1;
-        let total_now = total_players.load(Ordering::Relaxed);
-        let action = random_action(player_idx, total_now, tick);
-
-        let (url, body) = match action {
-            GameAction::PickupItem { item_type, quantity } => {
-                (&urls.pickup, pickup_item_json(&player_id, item_type, quantity))
-            }
-            GameAction::UseItem { item_type } => {
-                (&urls.use_item, use_item_json(&player_id, item_type))
-            }
-            GameAction::Interact { target_idx, event_type } => {
-                let target = all_ids.get(target_idx as usize).copied().unwrap_or(player_id);
-                (&urls.interact, interact_json(&player_id, &target, event_type))
-            }
-        };
-
-        let t0 = Instant::now();
-        match client.post(url.as_str()).header("Content-Type", "application/json").body(body).send().await {
-            Ok(resp) if resp.status().is_success() => { action_metrics.record_ok(t0.elapsed()); }
-            Ok(resp) => {
-                action_metrics.record_err();
-                if player_idx == 0 {
-                    let s = resp.status();
-                    let t = resp.text().await.unwrap_or_default();
-                    eprintln!("[player 0 action] HTTP {}: {}", s, &t[..t.len().min(200)]);
-                }
-            }
-            Err(_) => { action_metrics.record_err(); }
-        }
-    }
-}
-
-// -- Shared player positions for spatial read queries ----------------------
-
-struct SharedPositions {
-    xs: Vec<AtomicI64>,
-    zs: Vec<AtomicI64>,
-}
-
-impl SharedPositions {
-    fn new(count: u32) -> Self {
-        let n = count as usize;
-        Self {
-            xs: (0..n).map(|_| AtomicI64::new(0)).collect(),
-            zs: (0..n).map(|_| AtomicI64::new(0)).collect(),
-        }
-    }
-
-    fn set(&self, idx: u32, x: f64, z: f64) {
-        let i = idx as usize;
-        self.xs[i].store(x as i64, Ordering::Relaxed);
-        self.zs[i].store(z as i64, Ordering::Relaxed);
-    }
-
-    fn get(&self, idx: u32) -> (f64, f64) {
-        let i = idx as usize;
-        (self.xs[i].load(Ordering::Relaxed) as f64, self.zs[i].load(Ordering::Relaxed) as f64)
-    }
-}
-
-// -- World-state read loop (SpacetimeDB SQL polling with spatial filter) ----
-
-async fn read_loop_spacetimedb(
-    client: reqwest::Client,
-    sql_url: String,
-    read_rate: f64,
-    read_metrics: Arc<Metrics>,
-    stop: Arc<AtomicBool>,
-    player_idx: u32,
-    positions: Arc<SharedPositions>,
-) {
-    if read_rate <= 0.0 { return; }
-    let interval_us = (1_000_000.0 / read_rate) as u64;
-    let mut interval = time::interval(Duration::from_micros(interval_us));
-    interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-
-    while !stop.load(Ordering::Relaxed) {
-        interval.tick().await;
-        let (px, pz) = positions.get(player_idx);
-        let query = format!(
-            "SELECT * FROM entity WHERE x >= {} AND x <= {} AND z >= {} AND z <= {}",
-            (px - VISIBILITY_RADIUS) as i64,
-            (px + VISIBILITY_RADIUS) as i64,
-            (pz - VISIBILITY_RADIUS) as i64,
-            (pz + VISIBILITY_RADIUS) as i64,
-        );
-        let t0 = Instant::now();
-        match client.post(&sql_url)
-            .header("Content-Type", "text/plain")
-            .body(query)
-            .send().await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                let bytes = resp.bytes().await.map(|b| b.len() as u64).unwrap_or(0);
-                read_metrics.record_ok_bytes(t0.elapsed(), bytes);
-            }
-            Ok(resp) => {
-                read_metrics.record_err();
-                if player_idx == 0 {
-                    let s = resp.status();
-                    let t = resp.text().await.unwrap_or_default();
-                    eprintln!("[player 0 read] HTTP {}: {}", s, &t[..t.len().min(200)]);
-                }
-            }
-            Err(_) => { read_metrics.record_err(); }
-        }
-    }
-}
-
-// -- SpacetimeDB player task -----------------------------------------------
-
-async fn player_loop_spacetimedb(
-    client: reqwest::Client,
-    url_update_player: String,
-    url_update_player_input: String,
-    url_remove: String,
-    idx: u32, total: u32,
-    tick_interval: Duration,
-    metrics: Arc<Metrics>,
-    stop: Arc<AtomicBool>,
-    cluster_flag: Arc<AtomicBool>,
-    server_physics: bool,
-    positions: Arc<SharedPositions>,
-) {
-    let clustered = cluster_flag.load(Ordering::Relaxed);
-    let mut player = Player::new(idx, total, clustered);
-    positions.set(idx, player.x, player.z);
-    let tick_dt = tick_interval.as_secs_f64();
-    let mut interval = time::interval(tick_interval);
-    interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-
-    let mut first_tick = true;
-    while !stop.load(Ordering::Relaxed) {
-        interval.tick().await;
-        player.tick(tick_dt, cluster_flag.load(Ordering::Relaxed));
-        positions.set(idx, player.x, player.z);
-        let t0 = Instant::now();
-        if server_physics {
-            // Matches SpacetimeDB module's server_physics mode:
-            // - First tick: spawn/update initial position via update_player
-            // - Subsequent ticks: advance via direction-only inputs (update_player_input)
-            if first_tick {
-                let body = entity_json(&player.id, player.x, player.y, player.z, player.vx, player.vy, player.vz);
-                match client.post(&url_update_player).header("Content-Type", "application/json").body(body).send().await {
-                    Ok(resp) if resp.status().is_success() => { metrics.record_ok(t0.elapsed()); }
-                    Ok(resp) => {
-                        metrics.record_err();
-                        if idx == 0 {
-                            let s = resp.status();
-                            let t = resp.text().await.unwrap_or_default();
-                            eprintln!("[player 0] HTTP {}: {}", s, &t[..t.len().min(200)]);
-                        }
-                    }
-                    Err(e) => { metrics.record_err(); if idx == 0 { eprintln!("[player 0] error: {}", e); } }
-                }
-                first_tick = false;
-            } else {
-                let body = player_input_json(&player.id, player.dir_x, player.dir_z);
-                match client.post(&url_update_player_input).header("Content-Type", "application/json").body(body).send().await {
-                    Ok(resp) if resp.status().is_success() => { metrics.record_ok(t0.elapsed()); }
-                    Ok(resp) => {
-                        metrics.record_err();
-                        if idx == 0 {
-                            let s = resp.status();
-                            let t = resp.text().await.unwrap_or_default();
-                            eprintln!("[player 0] HTTP {}: {}", s, &t[..t.len().min(200)]);
-                        }
-                    }
-                    Err(e) => { metrics.record_err(); if idx == 0 { eprintln!("[player 0] error: {}", e); } }
-                }
-            }
-        } else {
-            let body = entity_json(&player.id, player.x, player.y, player.z, player.vx, player.vy, player.vz);
-            match client
-                .post(&url_update_player)
-                .header("Content-Type", "application/json")
-                .body(body)
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => { metrics.record_ok(t0.elapsed()); }
-                Ok(resp) => {
-                    metrics.record_err();
-                    if idx == 0 {
-                        let s = resp.status();
-                        let t = resp.text().await.unwrap_or_default();
-                        eprintln!("[player 0] HTTP {}: {}", s, &t[..t.len().min(200)]);
-                    }
-                }
-                Err(e) => { metrics.record_err(); if idx == 0 { eprintln!("[player 0] error: {}", e); } }
-            }
-        }
-    }
-    let body = entity_json(&player.id, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let _ = client.post(&url_remove).header("Content-Type", "application/json").body(body).send().await;
-}
-
-// -- Arcane (WebSocket) player task ----------------------------------------
-
-async fn player_loop_arcane(
-    endpoint: ArcaneEndpoint,
-    client: reqwest::Client,
-    idx: u32, total: u32,
-    tick_interval: Duration,
-    metrics: Arc<Metrics>,
-    read_metrics: Arc<Metrics>,
-    stop: Arc<AtomicBool>,
-    cluster_flag: Arc<AtomicBool>,
-) {
-    use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
-
-    let ws_url = resolve_arcane_ws(&endpoint, &client, idx).await;
-    let clustered = cluster_flag.load(Ordering::Relaxed);
-    let mut player = Player::new(idx, total, clustered);
-    let tick_dt = tick_interval.as_secs_f64();
-
-    let ws_stream = match tokio_tungstenite::connect_async(&ws_url).await {
-        Ok((stream, _)) => stream,
-        Err(e) => {
-            if idx == 0 { eprintln!("[player 0] WebSocket connect failed: {}", e); }
-            metrics.record_err();
-            return;
-        }
-    };
-    let (mut sink, mut stream) = ws_stream.split();
-
-    let stop_drain = stop.clone();
-    let rm = read_metrics.clone();
-    tokio::spawn(async move {
-        while !stop_drain.load(Ordering::Relaxed) {
-            match stream.next().await {
-                Some(Ok(Message::Text(txt))) => {
-                    rm.ok.fetch_add(1, Ordering::Relaxed);
-                    rm.bytes.fetch_add(txt.len() as u64, Ordering::Relaxed);
-                }
-                Some(Ok(Message::Binary(bin))) => {
-                    rm.ok.fetch_add(1, Ordering::Relaxed);
-                    rm.bytes.fetch_add(bin.len() as u64, Ordering::Relaxed);
-                }
-                Some(Ok(_)) => {}
-                _ => break,
-            }
-        }
-    });
-
-    let mut interval = time::interval(tick_interval);
-    interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-
-    while !stop.load(Ordering::Relaxed) {
-        interval.tick().await;
-        player.tick(tick_dt, cluster_flag.load(Ordering::Relaxed));
-        let msg = player_state_json(&player.id, player.x, player.y, player.z, player.vx, player.vy, player.vz);
-        let t0 = Instant::now();
-        match sink.send(Message::Text(msg.into())).await {
-            Ok(_) => { metrics.record_ok(t0.elapsed()); }
-            Err(e) => {
-                metrics.record_err();
-                if idx == 0 { eprintln!("[player 0] ws send error: {}", e); }
-                break;
-            }
-        }
-    }
-}
-
 // -- Metrics reporter ------------------------------------------------------
 
 fn fmt_bytes(b: u64) -> String {
@@ -743,8 +335,10 @@ async fn run_reporter(
         let w_ops = s.ok + s.err;
         let r_ops = r.ok + r.err;
 
-        let a = if has_actions { action_metrics.snapshot_and_reset() } else {
-            MetricsSnapshot { ok: 0, err: 0, avg_latency_us: 0, max_latency_us: 0, latency_sum_us: 0, latency_samples: 0, bytes: 0 }
+        let a = if has_actions {
+            action_metrics.snapshot_and_reset()
+        } else {
+            backends_spacetimedb::empty_snapshot()
         };
         let a_ops = a.ok + a.err;
         total_action_calls += a.ok + a.err;
@@ -842,7 +436,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
     let base = format!("{}/v1/database/{}/call", stdb_base, cfg.database);
     let sql_url = format!("{}/v1/database/{}/sql", stdb_base, cfg.database);
-    let action_urls = ActionUrls {
+    let action_urls = backends_spacetimedb::ActionUrls {
         pickup: format!("{}/pickup_item", base),
         use_item: format!("{}/use_item", base),
         interact: format!("{}/player_interact", base),
@@ -854,7 +448,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         .build()
         .expect("HTTP client");
 
-    let positions = Arc::new(SharedPositions::new(max_players));
+    let positions = Arc::new(backends_spacetimedb::SharedPositions::new(max_players));
     let cluster_flag = cfg.cluster_command.clone();
 
     let arcane_endpoint = match &cfg.arcane_manager {
@@ -892,7 +486,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                          metrics: &Arc<Metrics>,
                          action_metrics: &Arc<Metrics>,
                          read_metrics: &Arc<Metrics>,
-                         positions: &Arc<SharedPositions>,
+                         positions: &Arc<backends_spacetimedb::SharedPositions>,
                          cluster_flag: &Arc<AtomicBool>| {
         player_stop_flags[idx].store(false, Ordering::Relaxed);
         let stop = player_stop_flags[idx].clone();
@@ -903,7 +497,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                 let url_update_player = format!("{}/update_player", base);
                 let url_update_player_input = format!("{}/update_player_input", base);
                 let url_remove = format!("{}/remove_player", base);
-                let fut = player_loop_spacetimedb(
+                let fut = backends_spacetimedb::player_loop_spacetimedb(
                     http_client.clone(),
                     url_update_player,
                     url_update_player_input,
@@ -920,7 +514,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                 handles[idx] = Some(tokio::spawn(fut));
 
                 if cfg.read_rate > 0.0 {
-                    let read_fut = read_loop_spacetimedb(
+                    let read_fut = backends_spacetimedb::read_loop_spacetimedb(
                         http_client.clone(),
                         sql_url.clone(),
                         cfg.read_rate,
@@ -935,7 +529,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                 }
             }
             Backend::Arcane => {
-                let fut = player_loop_arcane(
+                let fut = backends_arcane::player_loop_arcane(
                     arcane_endpoint.clone(),
                     http_client.clone(),
                     idx as u32,
@@ -956,9 +550,9 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
             let player_id = all_ids[idx];
             let stop2 = player_stop_flags[idx].clone();
             let total_players = total_players_atomic.clone();
-            let fut = action_loop(
+            let fut = backends_spacetimedb::action_loop(
                 http_client.clone(),
-                ActionUrls {
+                backends_spacetimedb::ActionUrls {
                     pickup: action_urls.pickup.clone(),
                     use_item: action_urls.use_item.clone(),
                     interact: action_urls.interact.clone(),
@@ -1002,9 +596,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         let action_metrics = action_metrics.clone();
         let read_metrics = read_metrics.clone();
         Some(tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
             use tokio::net::TcpListener;
-            use tokio::net::TcpStream;
 
             let listener = TcpListener::bind(("127.0.0.1", cfg.control_port)).await
                 .expect("bind control port");
@@ -1077,7 +669,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     eprintln!("arcane-swarm(control): exiting.");
 
     async fn handle_control_connection(
-        mut stream: tokio::net::TcpStream,
+        stream: tokio::net::TcpStream,
         desired_players: Arc<AtomicU32>,
         stop_all: Arc<AtomicBool>,
         player_stop_flags: Arc<Vec<Arc<AtomicBool>>>,
@@ -1176,7 +768,7 @@ async fn main() {
     let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
     let base = format!("{}/v1/database/{}/call", stdb_base, cfg.database);
     let sql_url = format!("{}/v1/database/{}/sql", stdb_base, cfg.database);
-    let action_urls = ActionUrls {
+    let action_urls = backends_spacetimedb::ActionUrls {
         pickup: format!("{}/pickup_item", base),
         use_item: format!("{}/use_item", base),
         interact: format!("{}/player_interact", base),
@@ -1188,7 +780,7 @@ async fn main() {
         .build()
         .expect("HTTP client");
 
-    let positions = Arc::new(SharedPositions::new(cfg.players));
+    let positions = Arc::new(backends_spacetimedb::SharedPositions::new(cfg.players));
 
     match cfg.backend {
         Backend::SpacetimeDb => {
@@ -1198,7 +790,7 @@ async fn main() {
             eprintln!("  SpacetimeDB: {}/database/{}", cfg.spacetimedb_uri, cfg.database);
 
             for i in 0..cfg.players {
-                handles.push(tokio::spawn(player_loop_spacetimedb(
+                handles.push(tokio::spawn(backends_spacetimedb::player_loop_spacetimedb(
                     http_client.clone(),
                     url_update_player.clone(),
                     url_update_player_input.clone(),
@@ -1214,7 +806,7 @@ async fn main() {
                 eprintln!("  Read simulation: spatial queries (radius={}) at {} Hz per player ({} total queries/s)",
                     VISIBILITY_RADIUS, cfg.read_rate, cfg.read_rate as u64 * cfg.players as u64);
                 for i in 0..cfg.players {
-                    handles.push(tokio::spawn(read_loop_spacetimedb(
+                    handles.push(tokio::spawn(backends_spacetimedb::read_loop_spacetimedb(
                         http_client.clone(), sql_url.clone(),
                         cfg.read_rate, read_metrics.clone(), stop.clone(), i,
                         positions.clone(),
@@ -1234,7 +826,7 @@ async fn main() {
                 }
             };
             for i in 0..cfg.players {
-                handles.push(tokio::spawn(player_loop_arcane(
+                handles.push(tokio::spawn(backends_arcane::player_loop_arcane(
                     arcane_endpoint.clone(),
                     http_client.clone(),
                     i, cfg.players, tick_interval,
@@ -1247,9 +839,9 @@ async fn main() {
     if cfg.actions_per_sec > 0.0 {
         for i in 0..cfg.players {
             let player_id = all_ids[i as usize];
-            handles.push(tokio::spawn(action_loop(
+            handles.push(tokio::spawn(backends_spacetimedb::action_loop(
                 http_client.clone(),
-                ActionUrls {
+                backends_spacetimedb::ActionUrls {
                     pickup: action_urls.pickup.clone(),
                     use_item: action_urls.use_item.clone(),
                     interact: action_urls.interact.clone(),
