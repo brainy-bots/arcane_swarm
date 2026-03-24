@@ -1,8 +1,0 @@
-# Keep Docker build contexts lean
-**/.git
-**/target
-**/.idea
-**/.vscode
-**/*.log
-scripts/tools/
-Unreal/

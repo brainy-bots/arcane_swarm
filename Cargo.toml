@@ -1,0 +1,5 @@
+[workspace]
+members = [
+  "crates/arcane-swarm",
+]
+resolver = "2"
