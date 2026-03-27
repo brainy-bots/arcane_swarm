@@ -4,13 +4,21 @@ use std::time::{Duration, Instant};
 
 use tokio::time;
 
-use crate::{Metrics, MetricsSnapshot, Player, VISIBILITY_RADIUS};
+use arcane_swarm::{Metrics, Player, VISIBILITY_RADIUS};
 
 fn uuid_json(id: &uuid::Uuid) -> u128 {
     u128::from_be_bytes(*id.as_bytes())
 }
 
-pub(crate) fn entity_json(id: &uuid::Uuid, x: f64, y: f64, z: f64, _vx: f64, _vy: f64, _vz: f64) -> String {
+pub(crate) fn entity_json(
+    id: &uuid::Uuid,
+    x: f64,
+    y: f64,
+    z: f64,
+    _vx: f64,
+    _vy: f64,
+    _vz: f64,
+) -> String {
     format!(
         r#"[{{"entity_id":{{"__uuid__":{}}},"x":{},"y":{},"z":{}}}]"#,
         uuid_json(id),
@@ -25,7 +33,12 @@ fn player_input_json(id: &uuid::Uuid, dir_x: f64, dir_z: f64) -> String {
 }
 
 fn pickup_item_json(owner_id: &uuid::Uuid, item_type: u32, quantity: u32) -> String {
-    format!(r#"[{{"__uuid__":{}}},{},{}]"#, uuid_json(owner_id), item_type, quantity)
+    format!(
+        r#"[{{"__uuid__":{}}},{},{}]"#,
+        uuid_json(owner_id),
+        item_type,
+        quantity
+    )
 }
 
 fn use_item_json(owner_id: &uuid::Uuid, item_type: u32) -> String {
@@ -55,9 +68,12 @@ fn random_action(player_idx: u32, total_players: u32, tick: u64) -> GameAction {
             item_type: (seed % 20) as u32,
             quantity: 1 + (seed % 5) as u32,
         },
-        1 => GameAction::UseItem { item_type: (seed % 20) as u32 },
+        1 => GameAction::UseItem {
+            item_type: (seed % 20) as u32,
+        },
         _ => GameAction::Interact {
-            target_idx: (player_idx + 1 + (seed % total_players.max(2) as u64) as u32) % total_players,
+            target_idx: (player_idx + 1 + (seed % total_players.max(2) as u64) as u32)
+                % total_players.max(1),
             event_type: (seed % 4) as u32,
         },
     }
@@ -91,21 +107,39 @@ impl SharedPositions {
 
     pub(crate) fn get(&self, idx: u32) -> (f64, f64) {
         let i = idx as usize;
-        (self.xs[i].load(Ordering::Relaxed) as f64, self.zs[i].load(Ordering::Relaxed) as f64)
+        (
+            self.xs[i].load(Ordering::Relaxed) as f64,
+            self.zs[i].load(Ordering::Relaxed) as f64,
+        )
     }
 }
 
-pub(crate) async fn action_loop(
-    client: reqwest::Client,
-    urls: ActionUrls,
-    player_id: uuid::Uuid,
-    player_idx: u32,
-    total_players: Arc<AtomicU32>,
-    all_ids: Arc<Vec<uuid::Uuid>>,
-    actions_per_sec: f64,
-    action_metrics: Arc<Metrics>,
-    stop: Arc<AtomicBool>,
-) {
+/// Arguments for [`action_loop`].
+pub(crate) struct SpacetimeActionLoop {
+    pub client: reqwest::Client,
+    pub urls: ActionUrls,
+    pub player_id: uuid::Uuid,
+    pub player_idx: u32,
+    pub total_players: Arc<AtomicU32>,
+    pub all_ids: Arc<Vec<uuid::Uuid>>,
+    pub actions_per_sec: f64,
+    pub action_metrics: Arc<Metrics>,
+    pub stop: Arc<AtomicBool>,
+}
+
+pub(crate) async fn action_loop(ctx: SpacetimeActionLoop) {
+    let SpacetimeActionLoop {
+        client,
+        urls,
+        player_id,
+        player_idx,
+        total_players,
+        all_ids,
+        actions_per_sec,
+        action_metrics,
+        stop,
+    } = ctx;
+
     if actions_per_sec <= 0.0 {
         return;
     }
@@ -121,13 +155,28 @@ pub(crate) async fn action_loop(
         let action = random_action(player_idx, total_now, tick);
 
         let (url, body) = match action {
-            GameAction::PickupItem { item_type, quantity } => {
-                (&urls.pickup, pickup_item_json(&player_id, item_type, quantity))
+            GameAction::PickupItem {
+                item_type,
+                quantity,
+            } => (
+                &urls.pickup,
+                pickup_item_json(&player_id, item_type, quantity),
+            ),
+            GameAction::UseItem { item_type } => {
+                (&urls.use_item, use_item_json(&player_id, item_type))
             }
-            GameAction::UseItem { item_type } => (&urls.use_item, use_item_json(&player_id, item_type)),
-            GameAction::Interact { target_idx, event_type } => {
-                let target = all_ids.get(target_idx as usize).copied().unwrap_or(player_id);
-                (&urls.interact, interact_json(&player_id, &target, event_type))
+            GameAction::Interact {
+                target_idx,
+                event_type,
+            } => {
+                let target = all_ids
+                    .get(target_idx as usize)
+                    .copied()
+                    .unwrap_or(player_id);
+                (
+                    &urls.interact,
+                    interact_json(&player_id, &target, event_type),
+                )
             }
         };
 
@@ -157,15 +206,28 @@ pub(crate) async fn action_loop(
     }
 }
 
-pub(crate) async fn read_loop_spacetimedb(
-    client: reqwest::Client,
-    sql_url: String,
-    read_rate: f64,
-    read_metrics: Arc<Metrics>,
-    stop: Arc<AtomicBool>,
-    player_idx: u32,
-    positions: Arc<SharedPositions>,
-) {
+/// Arguments for [`read_loop_spacetimedb`].
+pub(crate) struct SpacetimeReadLoop {
+    pub client: reqwest::Client,
+    pub sql_url: String,
+    pub read_rate: f64,
+    pub read_metrics: Arc<Metrics>,
+    pub stop: Arc<AtomicBool>,
+    pub player_idx: u32,
+    pub positions: Arc<SharedPositions>,
+}
+
+pub(crate) async fn read_loop_spacetimedb(ctx: SpacetimeReadLoop) {
+    let SpacetimeReadLoop {
+        client,
+        sql_url,
+        read_rate,
+        read_metrics,
+        stop,
+        player_idx,
+        positions,
+    } = ctx;
+
     if read_rate <= 0.0 {
         return;
     }
@@ -210,20 +272,38 @@ pub(crate) async fn read_loop_spacetimedb(
     }
 }
 
-pub(crate) async fn player_loop_spacetimedb(
-    client: reqwest::Client,
-    url_update_player: String,
-    url_update_player_input: String,
-    url_remove: String,
-    idx: u32,
-    total: u32,
-    tick_interval: Duration,
-    metrics: Arc<Metrics>,
-    stop: Arc<AtomicBool>,
-    cluster_flag: Arc<AtomicBool>,
-    server_physics: bool,
-    positions: Arc<SharedPositions>,
-) {
+/// Arguments for [`player_loop_spacetimedb`].
+pub(crate) struct SpacetimePlayerLoop {
+    pub client: reqwest::Client,
+    pub url_update_player: String,
+    pub url_update_player_input: String,
+    pub url_remove: String,
+    pub idx: u32,
+    pub total: u32,
+    pub tick_interval: Duration,
+    pub metrics: Arc<Metrics>,
+    pub stop: Arc<AtomicBool>,
+    pub cluster_flag: Arc<AtomicBool>,
+    pub server_physics: bool,
+    pub positions: Arc<SharedPositions>,
+}
+
+pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
+    let SpacetimePlayerLoop {
+        client,
+        url_update_player,
+        url_update_player_input,
+        url_remove,
+        idx,
+        total,
+        tick_interval,
+        metrics,
+        stop,
+        cluster_flag,
+        server_physics,
+        positions,
+    } = ctx;
+
     let clustered = cluster_flag.load(Ordering::Relaxed);
     let mut player = Player::new(idx, total, clustered);
     positions.set(idx, player.x, player.z);
@@ -239,7 +319,9 @@ pub(crate) async fn player_loop_spacetimedb(
         let t0 = Instant::now();
         if server_physics {
             if first_tick {
-                let body = entity_json(&player.id, player.x, player.y, player.z, player.vx, player.vy, player.vz);
+                let body = entity_json(
+                    &player.id, player.x, player.y, player.z, player.vx, player.vy, player.vz,
+                );
                 match client
                     .post(&url_update_player)
                     .header("Content-Type", "application/json")
@@ -295,7 +377,9 @@ pub(crate) async fn player_loop_spacetimedb(
                 }
             }
         } else {
-            let body = entity_json(&player.id, player.x, player.y, player.z, player.vx, player.vy, player.vz);
+            let body = entity_json(
+                &player.id, player.x, player.y, player.z, player.vx, player.vy, player.vz,
+            );
             match client
                 .post(&url_update_player)
                 .header("Content-Type", "application/json")
@@ -324,17 +408,76 @@ pub(crate) async fn player_loop_spacetimedb(
         }
     }
     let body = entity_json(&player.id, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let _ = client.post(&url_remove).header("Content-Type", "application/json").body(body).send().await;
+    let _ = client
+        .post(&url_remove)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await;
 }
 
-pub(crate) fn empty_snapshot() -> MetricsSnapshot {
-    MetricsSnapshot {
-        ok: 0,
-        err: 0,
-        avg_latency_us: 0,
-        max_latency_us: 0,
-        latency_sum_us: 0,
-        latency_samples: 0,
-        bytes: 0,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn parse_json_array(body: &str) -> Value {
+        serde_json::from_str(body).expect("valid json payload")
+    }
+
+    #[test]
+    fn entity_json_emits_expected_shape() {
+        let id = uuid::Uuid::nil();
+        let body = entity_json(&id, 10.0, 20.0, 30.0, 1.0, 2.0, 3.0);
+        let parsed = parse_json_array(&body);
+        let obj = &parsed[0];
+
+        assert_eq!(obj["entity_id"]["__uuid__"], Value::from(0u64));
+        assert_eq!(obj["x"].as_f64(), Some(10.0));
+        assert_eq!(obj["y"].as_f64(), Some(20.0));
+        assert_eq!(obj["z"].as_f64(), Some(30.0));
+    }
+
+    #[test]
+    fn player_input_json_emits_expected_args() {
+        let id = uuid::Uuid::nil();
+        let body = player_input_json(&id, -1.0, 0.5);
+        let parsed = parse_json_array(&body);
+
+        assert_eq!(parsed[0]["__uuid__"], Value::from(0u64));
+        assert_eq!(parsed[1].as_f64(), Some(-1.0));
+        assert_eq!(parsed[2].as_f64(), Some(0.5));
+    }
+
+    #[test]
+    fn random_action_handles_zero_players_without_panic() {
+        for tick in 0..20 {
+            match random_action(0, 0, tick) {
+                GameAction::Interact {
+                    target_idx,
+                    event_type,
+                } => {
+                    assert_eq!(target_idx, 0);
+                    assert!(event_type < 4);
+                }
+                GameAction::PickupItem {
+                    item_type,
+                    quantity,
+                } => {
+                    assert!(item_type < 20);
+                    assert!((1..=5).contains(&quantity));
+                }
+                GameAction::UseItem { item_type } => {
+                    assert!(item_type < 20);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shared_positions_roundtrip() {
+        let positions = SharedPositions::new(2);
+        positions.set(1, 42.0, -9.0);
+        assert_eq!(positions.get(1), (42.0, -9.0));
     }
 }

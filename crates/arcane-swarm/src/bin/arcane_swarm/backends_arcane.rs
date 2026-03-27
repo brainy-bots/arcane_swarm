@@ -6,7 +6,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::{ArcaneEndpoint, Metrics, Player};
+use arcane_swarm::{player_state_json, ArcaneEndpoint, Metrics, Player};
 
 #[derive(serde::Deserialize)]
 struct ManagerJoinResponse {
@@ -36,12 +36,19 @@ pub(crate) async fn resolve_arcane_ws(
                         if player_idx == 0 && attempt == RETRIES - 1 {
                             let status = resp.status();
                             let t = resp.text().await.unwrap_or_default();
-                            eprintln!("[player 0] manager join HTTP {}: {}", status, &t[..t.len().min(200)]);
+                            eprintln!(
+                                "[player 0] manager join HTTP {}: {}",
+                                status,
+                                &t[..t.len().min(200)]
+                            );
                         }
                     }
                     Err(e) => {
                         if player_idx == 0 && attempt == RETRIES - 1 {
-                            eprintln!("[player 0] manager join error (after {} attempts): {}", RETRIES, e);
+                            eprintln!(
+                                "[player 0] manager join error (after {} attempts): {}",
+                                RETRIES, e
+                            );
                         }
                     }
                 }
@@ -58,17 +65,32 @@ pub(crate) async fn resolve_arcane_ws(
     }
 }
 
-pub(crate) async fn player_loop_arcane(
-    endpoint: ArcaneEndpoint,
-    client: reqwest::Client,
-    idx: u32,
-    total: u32,
-    tick_interval: Duration,
-    metrics: Arc<Metrics>,
-    read_metrics: Arc<Metrics>,
-    stop: Arc<AtomicBool>,
-    cluster_flag: Arc<AtomicBool>,
-) {
+/// Arguments for [`player_loop_arcane`].
+pub(crate) struct ArcanePlayerLoop {
+    pub endpoint: ArcaneEndpoint,
+    pub client: reqwest::Client,
+    pub idx: u32,
+    pub total: u32,
+    pub tick_interval: Duration,
+    pub metrics: Arc<Metrics>,
+    pub read_metrics: Arc<Metrics>,
+    pub stop: Arc<AtomicBool>,
+    pub cluster_flag: Arc<AtomicBool>,
+}
+
+pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
+    let ArcanePlayerLoop {
+        endpoint,
+        client,
+        idx,
+        total,
+        tick_interval,
+        metrics,
+        read_metrics,
+        stop,
+        cluster_flag,
+    } = ctx;
+
     let ws_url = resolve_arcane_ws(&endpoint, &client, idx).await;
     let clustered = cluster_flag.load(Ordering::Relaxed);
     let mut player = Player::new(idx, total, clustered);
@@ -92,12 +114,10 @@ pub(crate) async fn player_loop_arcane(
         while !stop_drain.load(Ordering::Relaxed) {
             match stream.next().await {
                 Some(Ok(Message::Text(txt))) => {
-                    rm.ok.fetch_add(1, Ordering::Relaxed);
-                    rm.bytes.fetch_add(txt.len() as u64, Ordering::Relaxed);
+                    rm.record_inbound_ok(txt.len() as u64);
                 }
                 Some(Ok(Message::Binary(bin))) => {
-                    rm.ok.fetch_add(1, Ordering::Relaxed);
-                    rm.bytes.fetch_add(bin.len() as u64, Ordering::Relaxed);
+                    rm.record_inbound_ok(bin.len() as u64);
                 }
                 Some(Ok(_)) => {}
                 _ => break,
@@ -111,11 +131,11 @@ pub(crate) async fn player_loop_arcane(
     while !stop.load(Ordering::Relaxed) {
         interval.tick().await;
         player.tick(tick_dt, cluster_flag.load(Ordering::Relaxed));
-        let msg = crate::player_state_json(
+        let msg = player_state_json(
             &player.id, player.x, player.y, player.z, player.vx, player.vy, player.vz,
         );
         let t0 = std::time::Instant::now();
-        match sink.send(Message::Text(msg.into())).await {
+        match sink.send(Message::Text(msg)).await {
             Ok(_) => {
                 metrics.record_ok(t0.elapsed());
             }
