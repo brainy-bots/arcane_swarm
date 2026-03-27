@@ -8,6 +8,8 @@ This page describes responsibilities and boundaries inside the `arcane-swarm` cr
 flowchart LR
   subgraph Lib["crates/arcane-swarm/src (library)"]
     Config["config"]
+    EngineApi["engine_api"]
+    Orchestration["orchestration"]
     Player["player"]
     Protocol["protocol"]
     Metrics["metrics"]
@@ -22,6 +24,8 @@ flowchart LR
   end
 
   Config --> Main
+  EngineApi --> Main
+  Orchestration --> Main
   Player --> ArcaneBackend
   Player --> StdbBackend
   Protocol --> ArcaneBackend
@@ -37,6 +41,8 @@ flowchart LR
 ## Responsibility summary
 
 - `config`: normalize CLI/env inputs into one `Config` consumed by orchestration.
+- `engine_api`: programmatic contract for embedding swarm-control capabilities.
+- `orchestration`: control-mode scaling decisions (spawn/stop reconciliation) testable with fake backends.
 - `player`: deterministic movement profile shared across all backend modes.
 - `protocol`: shared wire helpers for payload snippets that must stay consistent.
 - `metrics`: lock-free counters and latency stats used by all loops.

@@ -11,14 +11,19 @@
 //! - `protocol`: backend-agnostic wire helpers for shared payload snippets.
 //! - `metrics`: thread-safe operation and latency counters.
 //! - `reporter`: periodic stats printer/CSV emitter and final summary lines.
+//! - `engine_api`: embedding contract for tooling that drives swarm runs programmatically.
+//! - `orchestration`: backend-agnostic control-mode scaling logic with mock-friendly tests.
 
 pub mod config;
+pub mod engine_api;
 pub mod metrics;
+pub mod orchestration;
 pub mod player;
 pub mod protocol;
 pub mod reporter;
 
 pub use config::{parse_args, ArcaneEndpoint, Backend, Config, SwarmMode};
+pub use engine_api::{EngineRunConfig, EngineRunHandle, EngineSummary, SwarmEngine};
 pub use metrics::{Metrics, MetricsSnapshot};
 pub use player::Player;
 pub use protocol::{player_state_json, VISIBILITY_RADIUS};
