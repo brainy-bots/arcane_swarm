@@ -1,3 +1,7 @@
+//! Arcane backend loops (manager join + cluster WebSocket write/read).
+//!
+//! Implements binary-internal runtime behavior for `--backend arcane`.
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;

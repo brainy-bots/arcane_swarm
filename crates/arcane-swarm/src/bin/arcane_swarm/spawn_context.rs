@@ -1,4 +1,6 @@
 //! Shared handles for spawning per-player tasks from the binary orchestrator.
+//!
+//! This isolates orchestration-time wiring so backend modules focus only on loop logic.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;

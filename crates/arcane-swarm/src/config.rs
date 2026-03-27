@@ -1,4 +1,7 @@
 //! CLI and environment defaults for the swarm binary.
+//!
+//! This module is the entry contract between operators/benchmark scripts and runtime behavior:
+//! every flag/env var eventually maps into [`Config`], which is consumed by binary orchestration.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;

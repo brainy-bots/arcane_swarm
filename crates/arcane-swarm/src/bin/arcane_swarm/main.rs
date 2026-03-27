@@ -1,6 +1,7 @@
 //! Headless client swarm for load testing SpacetimeDB and Arcane+SpacetimeDB.
 //!
 //! Each logical player is a separate async task simulating a real game client.
+//! This binary composes backend implementations around shared library modules.
 //!
 //! Build:  `cargo build -p arcane-swarm --bin arcane-swarm --release`
 //!

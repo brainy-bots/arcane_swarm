@@ -1,4 +1,6 @@
 //! Periodic stderr + optional CSV reporting for swarm runs.
+//!
+//! Owns FINAL/FINAL_SPACETIMEDB summary emission consumed by benchmark parsers.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

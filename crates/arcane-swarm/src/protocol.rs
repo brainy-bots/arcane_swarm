@@ -1,4 +1,6 @@
 //! Wire-format helpers shared by backends (e.g. Arcane WebSocket payloads).
+//!
+//! Keeps shared payload fragments in one place to avoid backend drift.
 
 /// Spatial query radius (server units) for SpacetimeDB read simulation.
 pub const VISIBILITY_RADIUS: f64 = 1500.0;

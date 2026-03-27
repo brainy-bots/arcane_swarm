@@ -1,4 +1,6 @@
 //! Simple deterministic wander model for simulated clients.
+//!
+//! Shared by both backends so load profile is comparable independent of transport/runtime wiring.
 
 const WORLD_SIZE: f64 = 5000.0;
 const WORLD_CENTER: f64 = 2500.0;

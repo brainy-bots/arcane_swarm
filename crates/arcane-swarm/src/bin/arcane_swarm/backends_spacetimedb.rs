@@ -1,3 +1,7 @@
+//! SpacetimeDB backend loops (HTTP reducers + optional SQL reads + action traffic).
+//!
+//! Implements binary-internal runtime behavior for `--backend spacetimedb`.
+
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

@@ -1,4 +1,6 @@
 //! Atomic counters and rolling latency stats for swarm HTTP/WS operations.
+//!
+//! Used by backend loops and reporter tasks; intentionally lock-free for high player counts.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;

@@ -19,3 +19,7 @@ cargo build -p arcane-swarm --bin arcane-swarm --release
 ```bash
 cargo run -p arcane-swarm --bin arcane-swarm -- --help
 ```
+
+## Architecture docs
+
+- [`docs/MODULE_INTERACTIONS.md`](docs/MODULE_INTERACTIONS.md) - crate/module responsibilities and Mermaid interaction graph.
