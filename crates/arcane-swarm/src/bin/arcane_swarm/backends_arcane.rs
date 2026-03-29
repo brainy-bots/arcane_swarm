@@ -74,6 +74,7 @@ pub(crate) struct ArcanePlayerLoop {
     pub endpoint: ArcaneEndpoint,
     pub client: reqwest::Client,
     pub idx: u32,
+    pub entity_id: uuid::Uuid,
     pub total: u32,
     pub tick_interval: Duration,
     pub metrics: Arc<Metrics>,
@@ -87,6 +88,7 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
         endpoint,
         client,
         idx,
+        entity_id,
         total,
         tick_interval,
         metrics,
@@ -97,7 +99,7 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
 
     let ws_url = resolve_arcane_ws(&endpoint, &client, idx).await;
     let clustered = cluster_flag.load(Ordering::Relaxed);
-    let mut player = Player::new(idx, total, clustered);
+    let mut player = Player::new(entity_id, idx, total, clustered);
     let tick_dt = tick_interval.as_secs_f64();
 
     let ws_stream = match tokio_tungstenite::connect_async(&ws_url).await {

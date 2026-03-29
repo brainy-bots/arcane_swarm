@@ -23,6 +23,7 @@ pub(crate) struct PlayerLoopShared {
 #[derive(Clone)]
 pub(crate) struct PlayerSpawnParams {
     pub idx: u32,
+    pub entity_id: uuid::Uuid,
     pub desired_total: u32,
     pub tick_interval: Duration,
     pub stop: Arc<AtomicBool>,
@@ -53,6 +54,7 @@ pub(crate) fn spawn_control_mode_player(
     let stop = kit.player_stop_flags[idx].clone();
     let params = PlayerSpawnParams {
         idx: idx as u32,
+        entity_id: kit.all_ids[idx],
         desired_total,
         tick_interval: kit.tick_interval,
         stop: stop.clone(),

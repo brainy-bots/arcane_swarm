@@ -283,6 +283,7 @@ pub(crate) struct SpacetimePlayerLoop {
     pub url_update_player_input: String,
     pub url_remove: String,
     pub idx: u32,
+    pub entity_id: uuid::Uuid,
     pub total: u32,
     pub tick_interval: Duration,
     pub metrics: Arc<Metrics>,
@@ -299,6 +300,7 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
         url_update_player_input,
         url_remove,
         idx,
+        entity_id,
         total,
         tick_interval,
         metrics,
@@ -309,7 +311,7 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
     } = ctx;
 
     let clustered = cluster_flag.load(Ordering::Relaxed);
-    let mut player = Player::new(idx, total, clustered);
+    let mut player = Player::new(entity_id, idx, total, clustered);
     positions.set(idx, player.x, player.z);
     let tick_dt = tick_interval.as_secs_f64();
     let mut interval = time::interval(tick_interval);

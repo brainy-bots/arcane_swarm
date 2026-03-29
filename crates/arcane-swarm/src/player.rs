@@ -22,7 +22,8 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn new(idx: u32, total: u32, clustered: bool) -> Self {
+    /// `entity_id` must match SpacetimeDB action reducers (`all_ids[idx]`) and Arcane wire entity id for the same slot.
+    pub fn new(entity_id: uuid::Uuid, idx: u32, total: u32, clustered: bool) -> Self {
         let angle = (idx as f64 / total.max(1) as f64) * std::f64::consts::TAU;
         let radius = if clustered {
             CLUSTER_RADIUS
@@ -30,7 +31,7 @@ impl Player {
             WORLD_SIZE * 0.35
         };
         Self {
-            id: uuid::Uuid::new_v4(),
+            id: entity_id,
             x: WORLD_CENTER + radius * angle.cos(),
             y: 0.0,
             z: WORLD_CENTER + radius * angle.sin(),
@@ -88,7 +89,7 @@ mod tests {
 
     #[test]
     fn tick_stays_in_bounds_spread() {
-        let mut p = Player::new(0, 10, false);
+        let mut p = Player::new(uuid::Uuid::nil(), 0, 10, false);
         for _ in 0..200 {
             p.tick(0.05, false);
         }

@@ -77,6 +77,7 @@ impl BackendRuntime for SpacetimeRuntime {
                 url_update_player_input: self.url_update_player_input.clone(),
                 url_remove: self.url_remove.clone(),
                 idx: params.idx,
+                entity_id: params.entity_id,
                 total: params.desired_total,
                 tick_interval: params.tick_interval,
                 metrics: shared.metrics.clone(),
@@ -130,6 +131,7 @@ impl BackendRuntime for ArcaneRuntime {
                 endpoint: self.endpoint.clone(),
                 client: shared.http_client.clone(),
                 idx: params.idx,
+                entity_id: params.entity_id,
                 total: params.desired_total,
                 tick_interval: params.tick_interval,
                 metrics: shared.metrics.clone(),
@@ -520,6 +522,7 @@ async fn main() {
     for i in 0..cfg.players {
         let params = PlayerSpawnParams {
             idx: i,
+            entity_id: all_ids[i as usize],
             desired_total: cfg.players,
             tick_interval,
             stop: stop.clone(),
