@@ -10,7 +10,10 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
 
-use arcane_swarm::{player_state_json, ArcaneEndpoint, Metrics, Player};
+use arcane_swarm::{
+    is_zone_event_active, player_state_json, ArcaneEndpoint, BurstConfig, ErrorKind, Metrics,
+    Player,
+};
 
 #[derive(serde::Deserialize)]
 struct ManagerJoinResponse {
@@ -81,6 +84,8 @@ pub(crate) struct ArcanePlayerLoop {
     pub read_metrics: Arc<Metrics>,
     pub stop: Arc<AtomicBool>,
     pub cluster_flag: Arc<AtomicBool>,
+    pub burst: BurstConfig,
+    pub run_started: std::time::Instant,
 }
 
 pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
@@ -95,6 +100,8 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
         read_metrics,
         stop,
         cluster_flag,
+        burst,
+        run_started,
     } = ctx;
 
     let ws_url = resolve_arcane_ws(&endpoint, &client, idx).await;
@@ -108,7 +115,7 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
             if idx == 0 {
                 eprintln!("[player 0] WebSocket connect failed: {}", e);
             }
-            metrics.record_err();
+            metrics.record_err_kind(ErrorKind::NotDelivered);
             return;
         }
     };
@@ -126,7 +133,10 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
                     rm.record_inbound_ok(bin.len() as u64);
                 }
                 Some(Ok(_)) => {}
-                _ => break,
+                _ => {
+                    rm.record_err_kind(ErrorKind::ConnectionDrop);
+                    break;
+                }
             }
         }
     });
@@ -136,6 +146,9 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
 
     while !stop.load(Ordering::Relaxed) {
         interval.tick().await;
+        if is_zone_event_active(run_started.elapsed().as_millis() as u64, burst) {
+            player.steer_to_point(2500.0, 2500.0);
+        }
         player.tick(tick_dt, cluster_flag.load(Ordering::Relaxed));
         let msg = player_state_json(
             &player.id, player.x, player.y, player.z, player.vx, player.vy, player.vz,
@@ -146,7 +159,7 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
                 metrics.record_ok(t0.elapsed());
             }
             Err(e) => {
-                metrics.record_err();
+                metrics.record_err_kind(ErrorKind::NotDelivered);
                 if idx == 0 {
                     eprintln!("[player 0] ws send error: {}", e);
                 }

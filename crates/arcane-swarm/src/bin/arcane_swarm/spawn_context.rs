@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use arcane_swarm::Metrics;
+use arcane_swarm::{BurstConfig, Metrics};
 
 use super::backends_spacetimedb;
 
@@ -17,6 +17,8 @@ pub(crate) struct PlayerLoopShared {
     pub read_metrics: Arc<Metrics>,
     pub cluster_flag: Arc<AtomicBool>,
     pub positions: Arc<backends_spacetimedb::SharedPositions>,
+    pub burst: BurstConfig,
+    pub run_started: std::time::Instant,
 }
 
 /// Values that differ per player (or change when control port adjusts player count).
@@ -85,6 +87,8 @@ pub(crate) fn spawn_control_mode_player(
                 actions_per_sec: kit.actions_per_sec,
                 action_metrics: kit.action_metrics.clone(),
                 stop,
+                burst: kit.loop_shared.burst,
+                run_started: kit.loop_shared.run_started,
             },
         )));
     }

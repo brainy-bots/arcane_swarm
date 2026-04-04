@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use tokio::time;
 
-use crate::metrics::{Metrics, MetricsSnapshot};
+use crate::metrics::{ErrorBreakdown, Metrics, MetricsSnapshot};
 
 /// Arguments for [`run_reporter`].
 pub struct ReporterConfig<'a> {
@@ -56,6 +56,7 @@ pub async fn run_reporter(cfg: ReporterConfig<'_>) {
     let mut total_calls: u64 = 0;
     let mut total_latency_sum_us: u64 = 0;
     let mut total_latency_samples: u64 = 0;
+    let mut total_errors = ErrorBreakdown::default();
     let mut total_action_calls: u64 = 0;
     let mut total_action_oks: u64 = 0;
     let mut total_action_errs: u64 = 0;
@@ -68,6 +69,11 @@ pub async fn run_reporter(cfg: ReporterConfig<'_>) {
         total_calls += s.ok + s.err;
         total_latency_sum_us += s.latency_sum_us;
         total_latency_samples += s.latency_samples;
+        total_errors.timeout += s.errors.timeout;
+        total_errors.not_delivered += s.errors.not_delivered;
+        total_errors.http_status += s.errors.http_status;
+        total_errors.transport += s.errors.transport;
+        total_errors.connection_drop += s.errors.connection_drop;
 
         let elapsed = start.elapsed().as_secs();
         let w_ops = s.ok + s.err;
@@ -148,8 +154,13 @@ pub async fn run_reporter(cfg: ReporterConfig<'_>) {
                 0.0
             };
             eprintln!(
-                "FINAL: players={} total_calls={} total_oks={} total_errs={} lat_avg_ms={:.2}",
-                players, total_calls, total_oks, total_errs, lat_avg_ms,
+                "FINAL: players={} total_calls={} total_oks={} total_errs={} lat_avg_ms={:.2} err_json={}",
+                players,
+                total_calls,
+                total_oks,
+                total_errs,
+                lat_avg_ms,
+                total_errors.to_json(),
             );
             if has_actions {
                 let duration_secs = start.elapsed().as_secs().max(1);
