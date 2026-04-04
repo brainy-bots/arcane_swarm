@@ -85,6 +85,8 @@ impl BackendRuntime for SpacetimeRuntime {
                 cluster_flag: shared.cluster_flag.clone(),
                 server_physics: self.server_physics,
                 positions: shared.positions.clone(),
+                burst: shared.burst,
+                run_started: shared.run_started,
             },
         ))
     }
@@ -138,6 +140,8 @@ impl BackendRuntime for ArcaneRuntime {
                 read_metrics: shared.read_metrics.clone(),
                 stop: params.stop,
                 cluster_flag: shared.cluster_flag.clone(),
+                burst: shared.burst,
+                run_started: shared.run_started,
             },
         ))
     }
@@ -153,6 +157,7 @@ impl BackendRuntime for ArcaneRuntime {
 }
 
 async fn run_control_mode(cfg: Config, tick_interval: Duration) {
+    let run_started = std::time::Instant::now();
     let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
     let base = format!("{}/v1/database/{}/call", stdb_base, cfg.database);
     let sql_url = format!("{}/v1/database/{}/sql", stdb_base, cfg.database);
@@ -176,7 +181,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     };
     let backend_name = backend_runtime.name();
     eprintln!(
-        "arcane-swarm(control): initial_players={}, max_players={}, tick_rate={}, mode={}, backend={}, server_physics={}, actions/s={:.1}, read_rate={:.1}Hz control_port={}",
+        "arcane-swarm(control): initial_players={}, max_players={}, tick_rate={}, mode={}, backend={}, server_physics={}, actions/s={:.1}, read_rate={:.1}Hz burst_enabled={} control_port={}",
         cfg.players,
         cfg.max_players,
         cfg.tick_rate,
@@ -185,6 +190,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         cfg.server_physics,
         cfg.actions_per_sec,
         cfg.read_rate,
+        cfg.burst.enabled,
         cfg.control_port
     );
 
@@ -243,6 +249,8 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         read_metrics: read_metrics.clone(),
         cluster_flag: cluster_flag.clone(),
         positions: positions.clone(),
+        burst: cfg.burst,
+        run_started,
     };
 
     // Spawn initial players (and their optional read/action tasks).
@@ -407,8 +415,13 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                         0.0
                     };
                     eprintln!(
-                        "FINAL: players={} total_calls={} total_oks={} total_errs={} lat_avg_ms={:.2}",
-                        players, total_calls, snap.ok, snap.err, lat_avg_ms
+                        "FINAL: players={} total_calls={} total_oks={} total_errs={} lat_avg_ms={:.2} err_json={}",
+                        players,
+                        total_calls,
+                        snap.ok,
+                        snap.err,
+                        lat_avg_ms,
+                        snap.errors.to_json(),
                     );
                 }
                 "QUIT" => {
@@ -432,6 +445,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
 #[tokio::main]
 async fn main() {
     let cfg = parse_args();
+    let run_started = std::time::Instant::now();
     let tick_interval = Duration::from_micros(1_000_000 / cfg.tick_rate as u64);
     let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
     let base = format!("{}/v1/database/{}/call", stdb_base, cfg.database);
@@ -466,6 +480,17 @@ async fn main() {
         if cfg.mode == SwarmMode::Clustered { "clustered" } else { "spread" },
         backend_name, cfg.server_physics, cfg.duration_secs, cfg.actions_per_sec, cfg.read_rate,
     );
+    if cfg.burst.enabled {
+        eprintln!(
+            "  Burst profile: period={}s cohort={}%% actions/player={} window={}ms zone_period={}s zone_window={}ms",
+            cfg.burst.burst_period_secs,
+            cfg.burst.burst_cohort_percent,
+            cfg.burst.burst_actions_per_player,
+            cfg.burst.burst_window_ms,
+            cfg.burst.zone_event_period_secs,
+            cfg.burst.zone_event_window_ms,
+        );
+    }
 
     let metrics = Arc::new(Metrics::new());
     let action_metrics = Arc::new(Metrics::new());
@@ -517,6 +542,8 @@ async fn main() {
         read_metrics: read_metrics.clone(),
         cluster_flag: cfg.cluster_command.clone(),
         positions: positions.clone(),
+        burst: cfg.burst,
+        run_started,
     };
 
     for i in 0..cfg.players {
@@ -549,6 +576,8 @@ async fn main() {
                     actions_per_sec: cfg.actions_per_sec,
                     action_metrics: action_metrics.clone(),
                     stop: stop.clone(),
+                    burst: cfg.burst,
+                    run_started,
                 },
             )));
         }

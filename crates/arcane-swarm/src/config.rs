@@ -5,6 +5,7 @@
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use crate::BurstConfig;
 
 /// How each player resolves the Arcane cluster WebSocket URL.
 #[derive(Clone)]
@@ -50,6 +51,7 @@ pub struct Config {
     pub server_physics: bool,
     pub run_forever: bool,
     pub control_port: u16,
+    pub burst: BurstConfig,
 }
 
 pub fn parse_args() -> Config {
@@ -70,6 +72,7 @@ pub fn parse_args() -> Config {
     let mut server_physics: bool = false;
     let mut run_forever: bool = false;
     let mut control_port: u16 = 0;
+    let mut burst = BurstConfig::default();
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -145,6 +148,40 @@ pub fn parse_args() -> Config {
                 i += 1;
                 control_port = args[i].parse().unwrap_or(0);
             }
+            "--burst-enabled" => {
+                burst.enabled = true;
+            }
+            "--burst-disabled" => {
+                burst.enabled = false;
+            }
+            "--burst-period-secs" => {
+                i += 1;
+                burst.burst_period_secs = args[i].parse().unwrap_or(burst.burst_period_secs);
+            }
+            "--burst-cohort-percent" => {
+                i += 1;
+                burst.burst_cohort_percent =
+                    args[i].parse().unwrap_or(burst.burst_cohort_percent);
+            }
+            "--burst-actions-per-player" => {
+                i += 1;
+                burst.burst_actions_per_player =
+                    args[i].parse().unwrap_or(burst.burst_actions_per_player);
+            }
+            "--burst-window-ms" => {
+                i += 1;
+                burst.burst_window_ms = args[i].parse().unwrap_or(burst.burst_window_ms);
+            }
+            "--zone-event-period-secs" => {
+                i += 1;
+                burst.zone_event_period_secs =
+                    args[i].parse().unwrap_or(burst.zone_event_period_secs);
+            }
+            "--zone-event-window-ms" => {
+                i += 1;
+                burst.zone_event_window_ms =
+                    args[i].parse().unwrap_or(burst.zone_event_window_ms);
+            }
             "--help" | "-h" => {
                 eprintln!("arcane-swarm: headless client swarm\n");
                 eprintln!("  --backend MODE        spacetimedb | arcane (default spacetimedb)");
@@ -162,6 +199,14 @@ pub fn parse_args() -> Config {
                 eprintln!("  --server-physics      for spacetimedb backend: use update_player_input for movement");
                 eprintln!("  --run-forever          keep running until QUIT");
                 eprintln!("  --control-port PORT   enable TCP control server at 127.0.0.1:PORT");
+                eprintln!("  --burst-enabled      enable deterministic burst profile (default on)");
+                eprintln!("  --burst-disabled     disable deterministic burst profile");
+                eprintln!("  --burst-period-secs N    seconds between bursts (default 30)");
+                eprintln!("  --burst-cohort-percent N percentage of players in each burst (default 20)");
+                eprintln!("  --burst-actions-per-player N extra actions for selected players during burst (default 10)");
+                eprintln!("  --burst-window-ms N     burst window length in milliseconds (default 500)");
+                eprintln!("  --zone-event-period-secs N seconds between all-player convergence events (default 30)");
+                eprintln!("  --zone-event-window-ms N zone event steering window in milliseconds (default 500)");
                 eprintln!("  --csv PATH             write metrics CSV to this file");
                 eprintln!(
                     "  --uri URL              SpacetimeDB URI (default http://127.0.0.1:3000)"
@@ -198,5 +243,6 @@ pub fn parse_args() -> Config {
         server_physics,
         run_forever,
         control_port,
+        burst,
     }
 }

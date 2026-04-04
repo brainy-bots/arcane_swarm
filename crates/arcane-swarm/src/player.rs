@@ -81,6 +81,16 @@ impl Player {
             self.dir_z = -self.dir_z.abs();
         }
     }
+
+    pub fn steer_to_point(&mut self, target_x: f64, target_z: f64) {
+        let dx = target_x - self.x;
+        let dz = target_z - self.z;
+        let norm = (dx * dx + dz * dz).sqrt();
+        if norm > 0.0001 {
+            self.dir_x = dx / norm;
+            self.dir_z = dz / norm;
+        }
+    }
 }
 
 #[cfg(test)]

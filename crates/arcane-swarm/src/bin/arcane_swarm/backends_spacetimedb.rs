@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 
 use tokio::time;
 
-use arcane_swarm::{Metrics, Player, VISIBILITY_RADIUS};
+use arcane_swarm::{
+    burst_actions_to_emit, is_zone_event_active, BurstConfig, ErrorKind, Metrics, Player,
+    VISIBILITY_RADIUS,
+};
 
 fn uuid_json(id: &uuid::Uuid) -> u128 {
     u128::from_be_bytes(*id.as_bytes())
@@ -129,6 +132,8 @@ pub(crate) struct SpacetimeActionLoop {
     pub actions_per_sec: f64,
     pub action_metrics: Arc<Metrics>,
     pub stop: Arc<AtomicBool>,
+    pub burst: BurstConfig,
+    pub run_started: Instant,
 }
 
 pub(crate) async fn action_loop(ctx: SpacetimeActionLoop) {
@@ -142,6 +147,8 @@ pub(crate) async fn action_loop(ctx: SpacetimeActionLoop) {
         actions_per_sec,
         action_metrics,
         stop,
+        burst,
+        run_started,
     } = ctx;
 
     if actions_per_sec <= 0.0 {
@@ -157,54 +164,65 @@ pub(crate) async fn action_loop(ctx: SpacetimeActionLoop) {
         tick += 1;
         let total_now = total_players.load(Ordering::Relaxed);
         let action = random_action(player_idx, total_now, tick);
-
-        let (url, body) = match action {
-            GameAction::PickupItem {
-                item_type,
-                quantity,
-            } => (
-                &urls.pickup,
-                pickup_item_json(&player_id, item_type, quantity),
-            ),
-            GameAction::UseItem { item_type } => {
-                (&urls.use_item, use_item_json(&player_id, item_type))
-            }
-            GameAction::Interact {
-                target_idx,
-                event_type,
-            } => {
-                let target = all_ids
-                    .get(target_idx as usize)
-                    .copied()
-                    .unwrap_or(player_id);
-                (
-                    &urls.interact,
-                    interact_json(&player_id, &target, event_type),
-                )
-            }
-        };
-
-        let t0 = Instant::now();
-        match client
-            .post(url.as_str())
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                action_metrics.record_ok(t0.elapsed());
-            }
-            Ok(resp) => {
-                action_metrics.record_err();
-                if player_idx == 0 {
-                    let s = resp.status();
-                    let t = resp.text().await.unwrap_or_default();
-                    eprintln!("[player 0 action] HTTP {}: {}", s, &t[..t.len().min(200)]);
+        let mut burst_remaining =
+            burst_actions_to_emit(player_idx, run_started.elapsed().as_millis() as u64, burst);
+        if burst_remaining == 0 {
+            burst_remaining = 1;
+        }
+        for _ in 0..burst_remaining {
+            let (url, body) = match action {
+                GameAction::PickupItem {
+                    item_type,
+                    quantity,
+                } => (
+                    &urls.pickup,
+                    pickup_item_json(&player_id, item_type, quantity),
+                ),
+                GameAction::UseItem { item_type } => {
+                    (&urls.use_item, use_item_json(&player_id, item_type))
                 }
-            }
-            Err(_) => {
-                action_metrics.record_err();
+                GameAction::Interact {
+                    target_idx,
+                    event_type,
+                } => {
+                    let target = all_ids
+                        .get(target_idx as usize)
+                        .copied()
+                        .unwrap_or(player_id);
+                    (
+                        &urls.interact,
+                        interact_json(&player_id, &target, event_type),
+                    )
+                }
+            };
+
+            let t0 = Instant::now();
+            match client
+                .post(url.as_str())
+                .header("Content-Type", "application/json")
+                .body(body)
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    action_metrics.record_ok(t0.elapsed());
+                }
+                Ok(resp) => {
+                    action_metrics.record_err_kind(ErrorKind::HttpStatus);
+                    if player_idx == 0 {
+                        let s = resp.status();
+                        let t = resp.text().await.unwrap_or_default();
+                        eprintln!("[player 0 action] HTTP {}: {}", s, &t[..t.len().min(200)]);
+                    }
+                }
+                Err(e) => {
+                    let kind = if e.is_timeout() {
+                        ErrorKind::Timeout
+                    } else {
+                        ErrorKind::Transport
+                    };
+                    action_metrics.record_err_kind(kind);
+                }
             }
         }
     }
@@ -262,15 +280,20 @@ pub(crate) async fn read_loop_spacetimedb(ctx: SpacetimeReadLoop) {
                 read_metrics.record_ok_bytes(t0.elapsed(), bytes);
             }
             Ok(resp) => {
-                read_metrics.record_err();
+                read_metrics.record_err_kind(ErrorKind::HttpStatus);
                 if player_idx == 0 {
                     let s = resp.status();
                     let t = resp.text().await.unwrap_or_default();
                     eprintln!("[player 0 read] HTTP {}: {}", s, &t[..t.len().min(200)]);
                 }
             }
-            Err(_) => {
-                read_metrics.record_err();
+            Err(e) => {
+                let kind = if e.is_timeout() {
+                    ErrorKind::Timeout
+                } else {
+                    ErrorKind::Transport
+                };
+                read_metrics.record_err_kind(kind);
             }
         }
     }
@@ -291,6 +314,8 @@ pub(crate) struct SpacetimePlayerLoop {
     pub cluster_flag: Arc<AtomicBool>,
     pub server_physics: bool,
     pub positions: Arc<SharedPositions>,
+    pub burst: BurstConfig,
+    pub run_started: Instant,
 }
 
 pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
@@ -308,6 +333,8 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
         cluster_flag,
         server_physics,
         positions,
+        burst,
+        run_started,
     } = ctx;
 
     let clustered = cluster_flag.load(Ordering::Relaxed);
@@ -320,6 +347,9 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
     let mut first_tick = true;
     while !stop.load(Ordering::Relaxed) {
         interval.tick().await;
+        if is_zone_event_active(run_started.elapsed().as_millis() as u64, burst) {
+            player.steer_to_point(2500.0, 2500.0);
+        }
         player.tick(tick_dt, cluster_flag.load(Ordering::Relaxed));
         positions.set(idx, player.x, player.z);
         let t0 = Instant::now();
@@ -339,7 +369,7 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
                         metrics.record_ok(t0.elapsed());
                     }
                     Ok(resp) => {
-                        metrics.record_err();
+                        metrics.record_err_kind(ErrorKind::HttpStatus);
                         if idx == 0 {
                             let s = resp.status();
                             let t = resp.text().await.unwrap_or_default();
@@ -347,7 +377,12 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
                         }
                     }
                     Err(e) => {
-                        metrics.record_err();
+                        let kind = if e.is_timeout() {
+                            ErrorKind::Timeout
+                        } else {
+                            ErrorKind::Transport
+                        };
+                        metrics.record_err_kind(kind);
                         if idx == 0 {
                             eprintln!("[player 0] error: {}", e);
                         }
@@ -367,7 +402,7 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
                         metrics.record_ok(t0.elapsed());
                     }
                     Ok(resp) => {
-                        metrics.record_err();
+                        metrics.record_err_kind(ErrorKind::HttpStatus);
                         if idx == 0 {
                             let s = resp.status();
                             let t = resp.text().await.unwrap_or_default();
@@ -375,7 +410,12 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
                         }
                     }
                     Err(e) => {
-                        metrics.record_err();
+                        let kind = if e.is_timeout() {
+                            ErrorKind::Timeout
+                        } else {
+                            ErrorKind::Transport
+                        };
+                        metrics.record_err_kind(kind);
                         if idx == 0 {
                             eprintln!("[player 0] error: {}", e);
                         }
@@ -397,7 +437,7 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
                     metrics.record_ok(t0.elapsed());
                 }
                 Ok(resp) => {
-                    metrics.record_err();
+                    metrics.record_err_kind(ErrorKind::HttpStatus);
                     if idx == 0 {
                         let s = resp.status();
                         let t = resp.text().await.unwrap_or_default();
@@ -405,7 +445,12 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
                     }
                 }
                 Err(e) => {
-                    metrics.record_err();
+                    let kind = if e.is_timeout() {
+                        ErrorKind::Timeout
+                    } else {
+                        ErrorKind::Transport
+                    };
+                    metrics.record_err_kind(kind);
                     if idx == 0 {
                         eprintln!("[player 0] error: {}", e);
                     }
