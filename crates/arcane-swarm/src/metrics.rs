@@ -47,11 +47,7 @@ pub struct ErrorBreakdown {
 
 impl ErrorBreakdown {
     pub fn total(&self) -> u64 {
-        self.timeout
-            + self.not_delivered
-            + self.http_status
-            + self.transport
-            + self.connection_drop
+        self.timeout + self.not_delivered + self.http_status + self.transport + self.connection_drop
     }
 
     pub fn to_json(self) -> String {
