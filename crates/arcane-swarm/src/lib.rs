@@ -14,8 +14,8 @@
 //! - `engine_api`: embedding contract for tooling that drives swarm runs programmatically.
 //! - `orchestration`: backend-agnostic control-mode scaling logic with mock-friendly tests.
 
-pub mod config;
 pub mod burst;
+pub mod config;
 pub mod engine_api;
 pub mod metrics;
 pub mod orchestration;
@@ -23,8 +23,8 @@ pub mod player;
 pub mod protocol;
 pub mod reporter;
 
-pub use config::{parse_args, ArcaneEndpoint, Backend, Config, SwarmMode};
 pub use burst::{burst_actions_to_emit, is_zone_event_active, BurstConfig};
+pub use config::{parse_args, ArcaneEndpoint, Backend, Config, SwarmMode};
 pub use engine_api::{EngineRunConfig, EngineRunHandle, EngineSummary, SwarmEngine};
 pub use metrics::{ErrorBreakdown, ErrorKind, Metrics, MetricsSnapshot};
 pub use player::Player;

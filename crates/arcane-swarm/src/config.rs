@@ -3,9 +3,9 @@
 //! This module is the entry contract between operators/benchmark scripts and runtime behavior:
 //! every flag/env var eventually maps into [`Config`], which is consumed by binary orchestration.
 
+use crate::BurstConfig;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use crate::BurstConfig;
 
 /// How each player resolves the Arcane cluster WebSocket URL.
 #[derive(Clone)]
@@ -160,8 +160,7 @@ pub fn parse_args() -> Config {
             }
             "--burst-cohort-percent" => {
                 i += 1;
-                burst.burst_cohort_percent =
-                    args[i].parse().unwrap_or(burst.burst_cohort_percent);
+                burst.burst_cohort_percent = args[i].parse().unwrap_or(burst.burst_cohort_percent);
             }
             "--burst-actions-per-player" => {
                 i += 1;
@@ -179,8 +178,7 @@ pub fn parse_args() -> Config {
             }
             "--zone-event-window-ms" => {
                 i += 1;
-                burst.zone_event_window_ms =
-                    args[i].parse().unwrap_or(burst.zone_event_window_ms);
+                burst.zone_event_window_ms = args[i].parse().unwrap_or(burst.zone_event_window_ms);
             }
             "--help" | "-h" => {
                 eprintln!("arcane-swarm: headless client swarm\n");
@@ -202,9 +200,13 @@ pub fn parse_args() -> Config {
                 eprintln!("  --burst-enabled      enable deterministic burst profile (default on)");
                 eprintln!("  --burst-disabled     disable deterministic burst profile");
                 eprintln!("  --burst-period-secs N    seconds between bursts (default 30)");
-                eprintln!("  --burst-cohort-percent N percentage of players in each burst (default 20)");
+                eprintln!(
+                    "  --burst-cohort-percent N percentage of players in each burst (default 20)"
+                );
                 eprintln!("  --burst-actions-per-player N extra actions for selected players during burst (default 10)");
-                eprintln!("  --burst-window-ms N     burst window length in milliseconds (default 500)");
+                eprintln!(
+                    "  --burst-window-ms N     burst window length in milliseconds (default 500)"
+                );
                 eprintln!("  --zone-event-period-secs N seconds between all-player convergence events (default 30)");
                 eprintln!("  --zone-event-window-ms N zone event steering window in milliseconds (default 500)");
                 eprintln!("  --csv PATH             write metrics CSV to this file");
