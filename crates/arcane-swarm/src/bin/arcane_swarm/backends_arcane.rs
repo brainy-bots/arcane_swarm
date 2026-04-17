@@ -11,8 +11,8 @@ use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
 
 use arcane_swarm::{
-    is_zone_event_active, player_state_json, ArcaneEndpoint, BurstConfig, ErrorKind, Metrics,
-    Player,
+    game_action_json, is_zone_event_active, player_state_json, ArcaneEndpoint, BurstConfig,
+    ErrorKind, Metrics, Player,
 };
 
 #[derive(serde::Deserialize)]
@@ -82,10 +82,42 @@ pub(crate) struct ArcanePlayerLoop {
     pub tick_interval: Duration,
     pub metrics: Arc<Metrics>,
     pub read_metrics: Arc<Metrics>,
+    pub action_metrics: Arc<Metrics>,
     pub stop: Arc<AtomicBool>,
     pub cluster_flag: Arc<AtomicBool>,
+    pub actions_per_sec: f64,
     pub burst: BurstConfig,
     pub run_started: std::time::Instant,
+}
+
+/// Pick a random game action for this player at this tick.
+fn random_arcane_action(player_idx: u32, tick: u64) -> (&'static str, String) {
+    let seed = (player_idx as u64).wrapping_mul(31) ^ tick.wrapping_mul(7);
+    match seed % 5 {
+        0 => {
+            let item_type = (seed % 20) as u32;
+            let quantity = 1 + (seed % 5) as u32;
+            (
+                "pickup_item",
+                format!(r#"{{"item_type":{},"quantity":{}}}"#, item_type, quantity),
+            )
+        }
+        1 => {
+            let item_type = (seed % 20) as u32;
+            ("use_item", format!(r#"{{"item_type":{}}}"#, item_type))
+        }
+        _ => {
+            let event_type = (seed % 4) as u32;
+            (
+                "interact",
+                format!(
+                    r#"{{"target_id":"{}","event_type":{}}}"#,
+                    uuid::Uuid::nil(),
+                    event_type
+                ),
+            )
+        }
+    }
 }
 
 pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
@@ -98,8 +130,10 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
         tick_interval,
         metrics,
         read_metrics,
+        action_metrics,
         stop,
         cluster_flag,
+        actions_per_sec,
         burst,
         run_started,
     } = ctx;
@@ -144,12 +178,23 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
     let mut interval = time::interval(tick_interval);
     interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
+    // Action timing: send game actions at configured rate via the same WebSocket
+    let action_interval_us = if actions_per_sec > 0.0 {
+        Some((1_000_000.0 / actions_per_sec) as u64)
+    } else {
+        None
+    };
+    let mut last_action = std::time::Instant::now();
+    let mut action_tick: u64 = 0;
+
     while !stop.load(Ordering::Relaxed) {
         interval.tick().await;
         if is_zone_event_active(run_started.elapsed().as_millis() as u64, burst) {
             player.steer_to_point(2500.0, 2500.0);
         }
         player.tick(tick_dt, cluster_flag.load(Ordering::Relaxed));
+
+        // Send movement
         let msg = player_state_json(
             &player.id, player.x, player.y, player.z, player.vx, player.vy, player.vz,
         );
@@ -164,6 +209,29 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
                     eprintln!("[player 0] ws send error: {}", e);
                 }
                 break;
+            }
+        }
+
+        // Send game action if it's time
+        if let Some(interval_us) = action_interval_us {
+            if last_action.elapsed() >= Duration::from_micros(interval_us) {
+                action_tick += 1;
+                let (action_type, payload) = random_arcane_action(idx, action_tick);
+                let action_msg = game_action_json(&player.id, action_type, &payload);
+                let t0 = std::time::Instant::now();
+                match sink.send(Message::Text(action_msg)).await {
+                    Ok(_) => {
+                        action_metrics.record_ok(t0.elapsed());
+                    }
+                    Err(e) => {
+                        action_metrics.record_err();
+                        if idx == 0 {
+                            eprintln!("[player 0] ws action send error: {}", e);
+                        }
+                        break;
+                    }
+                }
+                last_action = std::time::Instant::now();
             }
         }
     }
