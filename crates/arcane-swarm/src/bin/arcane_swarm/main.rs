@@ -116,6 +116,8 @@ impl BackendRuntime for SpacetimeRuntime {
 
 struct ArcaneRuntime {
     endpoint: ArcaneEndpoint,
+    action_metrics: Arc<Metrics>,
+    actions_per_sec: f64,
 }
 
 impl BackendRuntime for ArcaneRuntime {
@@ -138,8 +140,10 @@ impl BackendRuntime for ArcaneRuntime {
                 tick_interval: params.tick_interval,
                 metrics: shared.metrics.clone(),
                 read_metrics: shared.read_metrics.clone(),
+                action_metrics: self.action_metrics.clone(),
                 stop: params.stop,
                 cluster_flag: shared.cluster_flag.clone(),
+                actions_per_sec: self.actions_per_sec,
                 burst: shared.burst,
                 run_started: shared.run_started,
             },
@@ -161,6 +165,11 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
     let base = format!("{}/v1/database/{}/call", stdb_base, cfg.database);
     let sql_url = format!("{}/v1/database/{}/sql", stdb_base, cfg.database);
+
+    let metrics = Arc::new(Metrics::new());
+    let action_metrics = Arc::new(Metrics::new());
+    let read_metrics = Arc::new(Metrics::new());
+
     let backend_runtime: Arc<dyn BackendRuntime> = match cfg.backend {
         Backend::SpacetimeDb => Arc::new(SpacetimeRuntime {
             url_update_player: format!("{}/update_player", base),
@@ -176,7 +185,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                 },
                 None => ArcaneEndpoint::SingleUrl(cfg.arcane_ws.clone()),
             };
-            Arc::new(ArcaneRuntime { endpoint })
+            Arc::new(ArcaneRuntime { endpoint, action_metrics: action_metrics.clone(), actions_per_sec: cfg.actions_per_sec })
         }
     };
     let backend_name = backend_runtime.name();
@@ -197,10 +206,6 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     let desired_players = Arc::new(AtomicU32::new(cfg.players.min(cfg.max_players)));
     let total_players_atomic = desired_players.clone();
     let stop_all = Arc::new(AtomicBool::new(false));
-
-    let metrics = Arc::new(Metrics::new());
-    let action_metrics = Arc::new(Metrics::new());
-    let read_metrics = Arc::new(Metrics::new());
 
     let max_players = cfg.max_players;
     // 0..max => player tasks, max..2*max => action tasks
@@ -450,6 +455,11 @@ async fn main() {
     let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
     let base = format!("{}/v1/database/{}/call", stdb_base, cfg.database);
     let sql_url = format!("{}/v1/database/{}/sql", stdb_base, cfg.database);
+
+    let metrics = Arc::new(Metrics::new());
+    let action_metrics = Arc::new(Metrics::new());
+    let read_metrics = Arc::new(Metrics::new());
+
     let backend_runtime: Arc<dyn BackendRuntime> = match cfg.backend {
         Backend::SpacetimeDb => Arc::new(SpacetimeRuntime {
             url_update_player: format!("{}/update_player", base),
@@ -465,7 +475,7 @@ async fn main() {
                 },
                 None => ArcaneEndpoint::SingleUrl(cfg.arcane_ws.clone()),
             };
-            Arc::new(ArcaneRuntime { endpoint })
+            Arc::new(ArcaneRuntime { endpoint, action_metrics: action_metrics.clone(), actions_per_sec: cfg.actions_per_sec })
         }
     };
     let backend_name = backend_runtime.name();
@@ -492,9 +502,6 @@ async fn main() {
         );
     }
 
-    let metrics = Arc::new(Metrics::new());
-    let action_metrics = Arc::new(Metrics::new());
-    let read_metrics = Arc::new(Metrics::new());
     let stop = Arc::new(AtomicBool::new(false));
     let total_players_atomic = Arc::new(AtomicU32::new(cfg.players));
     let mut handles = Vec::with_capacity(cfg.players as usize * 3);
@@ -558,7 +565,9 @@ async fn main() {
         let _ = backend_runtime.spawn_read(&loop_shared, &params, cfg.read_rate);
     }
 
-    if cfg.actions_per_sec > 0.0 {
+    // In Arcane mode, actions go through the WebSocket (handled inside player_loop_arcane).
+    // In SpacetimeDB mode, actions go via HTTP to SpacetimeDB directly.
+    if cfg.actions_per_sec > 0.0 && backend_name == "spacetimedb" {
         for i in 0..cfg.players {
             let player_id = all_ids[i as usize];
             handles.push(tokio::spawn(backends_spacetimedb::action_loop(
