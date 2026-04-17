@@ -185,7 +185,11 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                 },
                 None => ArcaneEndpoint::SingleUrl(cfg.arcane_ws.clone()),
             };
-            Arc::new(ArcaneRuntime { endpoint, action_metrics: action_metrics.clone(), actions_per_sec: cfg.actions_per_sec })
+            Arc::new(ArcaneRuntime {
+                endpoint,
+                action_metrics: action_metrics.clone(),
+                actions_per_sec: cfg.actions_per_sec,
+            })
         }
     };
     let backend_name = backend_runtime.name();
@@ -475,7 +479,11 @@ async fn main() {
                 },
                 None => ArcaneEndpoint::SingleUrl(cfg.arcane_ws.clone()),
             };
-            Arc::new(ArcaneRuntime { endpoint, action_metrics: action_metrics.clone(), actions_per_sec: cfg.actions_per_sec })
+            Arc::new(ArcaneRuntime {
+                endpoint,
+                action_metrics: action_metrics.clone(),
+                actions_per_sec: cfg.actions_per_sec,
+            })
         }
     };
     let backend_name = backend_runtime.name();
