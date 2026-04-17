@@ -23,11 +23,7 @@ pub fn player_state_json(
 
 /// JSON for Arcane cluster `GAME_ACTION` WebSocket messages.
 /// Used when simulation-affecting actions go through the cluster.
-pub fn game_action_json(
-    entity_id: &uuid::Uuid,
-    action_type: &str,
-    payload: &str,
-) -> String {
+pub fn game_action_json(entity_id: &uuid::Uuid, action_type: &str, payload: &str) -> String {
     format!(
         r#"{{"type":"GAME_ACTION","entity_id":"{}","action_type":"{}","payload":{}}}"#,
         entity_id, action_type, payload
