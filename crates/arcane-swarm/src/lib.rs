@@ -26,5 +26,5 @@ pub use config::{parse_args, ArcaneEndpoint, Backend, Config, SwarmMode};
 pub use engine_api::{EngineRunConfig, EngineRunHandle, EngineSummary, SwarmEngine};
 pub use metrics::{Metrics, MetricsSnapshot};
 pub use player::Player;
-pub use protocol::{player_state_json, VISIBILITY_RADIUS};
+pub use protocol::{game_action_json, player_state_json, VISIBILITY_RADIUS};
 pub use reporter::{fmt_bytes, run_reporter, ReporterConfig};
