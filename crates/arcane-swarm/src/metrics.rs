@@ -157,7 +157,7 @@ impl Metrics {
         let sum = self.latency_sum_us.swap(0, Ordering::Relaxed);
         let max = self.latency_max_us.swap(0, Ordering::Relaxed);
         let n = self.latency_samples.swap(0, Ordering::Relaxed);
-        let avg = if n > 0 { sum / n } else { 0 };
+        let avg = sum.checked_div(n).unwrap_or(0);
         let bytes = self.bytes.swap(0, Ordering::Relaxed);
         let errors = ErrorBreakdown {
             timeout: self.err_timeout.swap(0, Ordering::Relaxed),
