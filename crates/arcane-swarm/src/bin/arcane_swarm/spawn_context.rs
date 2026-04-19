@@ -11,12 +11,20 @@ use arcane_swarm::{BurstConfig, Metrics};
 use super::backends_spacetimedb;
 
 /// HTTP client, metric sinks, and flags shared by every player loop on a run.
+///
+/// Action-loop config (rate, metrics, target pool) lives here too because both
+/// backends carry movement and actions on the same WebSocket — so both
+/// `spawn_player` implementations need to read it from one place.
 pub(crate) struct PlayerLoopShared {
     pub http_client: reqwest::Client,
     pub metrics: Arc<Metrics>,
     pub read_metrics: Arc<Metrics>,
+    pub action_metrics: Arc<Metrics>,
     pub cluster_flag: Arc<AtomicBool>,
     pub positions: Arc<backends_spacetimedb::SharedPositions>,
+    pub all_ids: Arc<Vec<uuid::Uuid>>,
+    pub total_players: Arc<AtomicU32>,
+    pub actions_per_sec: f64,
     pub burst: BurstConfig,
     pub run_started: std::time::Instant,
 }
@@ -39,12 +47,6 @@ pub(crate) struct ControlSpawnKit<'a> {
     pub backend_runtime: &'a Arc<dyn crate::BackendRuntime>,
     pub tick_interval: Duration,
     pub read_rate: f64,
-    pub actions_per_sec: f64,
-    pub max_players: u32,
-    pub action_urls: &'a backends_spacetimedb::ActionUrls,
-    pub all_ids: Arc<Vec<uuid::Uuid>>,
-    pub total_players_atomic: Arc<AtomicU32>,
-    pub action_metrics: Arc<Metrics>,
 }
 
 pub(crate) fn spawn_control_mode_player(
@@ -56,10 +58,10 @@ pub(crate) fn spawn_control_mode_player(
     let stop = kit.player_stop_flags[idx].clone();
     let params = PlayerSpawnParams {
         idx: idx as u32,
-        entity_id: kit.all_ids[idx],
+        entity_id: kit.loop_shared.all_ids[idx],
         desired_total,
         tick_interval: kit.tick_interval,
-        stop: stop.clone(),
+        stop,
     };
     kit.handles[idx] = Some(
         kit.backend_runtime
@@ -68,28 +70,4 @@ pub(crate) fn spawn_control_mode_player(
     let _ = kit
         .backend_runtime
         .spawn_read(kit.loop_shared, &params, kit.read_rate);
-
-    if kit.actions_per_sec > 0.0 {
-        let action_idx = kit.max_players as usize + idx;
-        let player_id = kit.all_ids[idx];
-        kit.handles[action_idx] = Some(tokio::spawn(backends_spacetimedb::action_loop(
-            backends_spacetimedb::SpacetimeActionLoop {
-                client: kit.loop_shared.http_client.clone(),
-                urls: backends_spacetimedb::ActionUrls {
-                    pickup: kit.action_urls.pickup.clone(),
-                    use_item: kit.action_urls.use_item.clone(),
-                    interact: kit.action_urls.interact.clone(),
-                },
-                player_id,
-                player_idx: idx as u32,
-                total_players: kit.total_players_atomic.clone(),
-                all_ids: kit.all_ids.clone(),
-                actions_per_sec: kit.actions_per_sec,
-                action_metrics: kit.action_metrics.clone(),
-                stop,
-                burst: kit.loop_shared.burst,
-                run_started: kit.loop_shared.run_started,
-            },
-        )));
-    }
 }
