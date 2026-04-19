@@ -570,7 +570,7 @@ async fn main() {
         let f = std::fs::File::create(p).expect("cannot create CSV file");
         let mut w = std::io::BufWriter::new(f);
         use std::io::Write;
-        writeln!(w, "elapsed_s,players,w_ok,w_err,w_ops,w_avg_ms,w_max_ms,r_ok,r_err,r_ops,r_avg_ms,r_bytes,a_ok,a_err,a_avg_ms").unwrap();
+        writeln!(w, "elapsed_s,players,w_ok,w_err,w_ops,w_avg_ms,w_max_ms,r_ok,r_err,r_ops,r_avg_ms,r_bytes,a_ok,a_err,a_avg_ms,drv_cpu_pct,drv_rss_mb").unwrap();
         w
     });
     let csv_file = Arc::new(tokio::sync::Mutex::new(csv_file));
