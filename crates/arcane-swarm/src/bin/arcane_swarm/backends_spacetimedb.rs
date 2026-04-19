@@ -1,6 +1,29 @@
-//! SpacetimeDB backend loops (HTTP reducers + optional SQL reads + action traffic).
+//! SpacetimeDB backend loops — native SDK over a persistent WebSocket per
+//! simulated player.
 //!
-//! Implements binary-internal runtime behavior for `--backend spacetimedb`.
+//! ## Why SDK + WebSocket (not HTTP POST)
+//!
+//! SpacetimeDB's own docs steer real clients toward the SDK over WebSocket:
+//! fire-and-forget reducer calls, no ~1–5 ms HTTP overhead per request, no JSON
+//! round-trip per reducer arg, persistent connection lifecycle. The previous
+//! revision of this file used `reqwest::Client::post(...)` per reducer call —
+//! which is the "CLI / tests" pipe, not the pipe a game client would use.
+//!
+//! ## One WebSocket per simulated player
+//!
+//! The benchmark's premise is "N independent game clients drive N players."
+//! We honour that by opening one `DbConnection` per player and wrapping it in
+//! an `Arc` so the per-tick position loop, the action loop, and the read loop
+//! share a single socket. SpacetimeDB's module is anonymous (no per-identity
+//! auth), so sharing the connection across these loops doesn't change what the
+//! module sees: reducer calls carry their own `entity_id` argument.
+//!
+//! ## What still uses HTTP
+//!
+//! Spatial reads (`SELECT * FROM entity WHERE x BETWEEN … AND z BETWEEN …`)
+//! stay on the HTTP SQL endpoint. After the module-side `btree(x, z)` index
+//! landed, these are cheap — SQL subscriptions would be equivalent here for a
+//! worse-DX tradeoff, so the HTTP path survives.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -13,52 +36,60 @@ use arcane_swarm::{
     VISIBILITY_RADIUS,
 };
 
-fn uuid_json(id: &uuid::Uuid) -> u128 {
-    u128::from_be_bytes(*id.as_bytes())
+use crate::spacetimedb_bindings::{
+    pickup_item_reducer::pickup_item, player_interact_reducer::player_interact,
+    remove_player_by_id_reducer::remove_player_by_id,
+    update_player_input_reducer::update_player_input, update_player_reducer::update_player,
+    use_item_reducer::use_item, DbConnection, Entity,
+};
+
+use spacetimedb_sdk::{DbContext, Uuid as StdbUuid};
+
+/// Convert a runtime `uuid::Uuid` into the SpacetimeDB-native `Uuid`. These
+/// are two different types (SpacetimeDB's is `{ __uuid__: u128 }`) even though
+/// they carry the same 128-bit value.
+fn to_stdb_uuid(id: &uuid::Uuid) -> StdbUuid {
+    StdbUuid::from_u128(u128::from_be_bytes(*id.as_bytes()))
 }
 
-pub(crate) fn entity_json(
-    id: &uuid::Uuid,
-    x: f64,
-    y: f64,
-    z: f64,
-    _vx: f64,
-    _vy: f64,
-    _vz: f64,
-) -> String {
-    format!(
-        r#"[{{"entity_id":{{"__uuid__":{}}},"x":{},"y":{},"z":{}}}]"#,
-        uuid_json(id),
-        x,
-        y,
-        z
-    )
+/// Connection parameters the swarm needs to open one `DbConnection` per player.
+///
+/// `ws_uri` is the SpacetimeDB host as a WebSocket URL (e.g. `ws://host:3000`
+/// or `wss://host:3000`). `database_name` is the published module's database
+/// name — same value passed to `spacetime publish`.
+#[derive(Clone)]
+pub(crate) struct SpacetimeConnectParams {
+    pub ws_uri: String,
+    pub database_name: String,
 }
 
-fn player_input_json(id: &uuid::Uuid, dir_x: f64, dir_z: f64) -> String {
-    format!(r#"[{{"__uuid__":{}}},{},{}]"#, uuid_json(id), dir_x, dir_z)
-}
-
-fn pickup_item_json(owner_id: &uuid::Uuid, item_type: u32, quantity: u32) -> String {
-    format!(
-        r#"[{{"__uuid__":{}}},{},{}]"#,
-        uuid_json(owner_id),
-        item_type,
-        quantity
-    )
-}
-
-fn use_item_json(owner_id: &uuid::Uuid, item_type: u32) -> String {
-    format!(r#"[{{"__uuid__":{}}},{}]"#, uuid_json(owner_id), item_type)
-}
-
-fn interact_json(actor_id: &uuid::Uuid, target_id: &uuid::Uuid, event_type: u32) -> String {
-    format!(
-        r#"[{{"__uuid__":{}}},{{"__uuid__":{}}},{}]"#,
-        uuid_json(actor_id),
-        uuid_json(target_id),
-        event_type
-    )
+/// Build a `DbConnection` that runs its message loop in a background task.
+/// Returns an `Arc<DbConnection>` so the caller can clone it into every loop
+/// (position tick, actions, shutdown) that needs to fire reducers.
+///
+/// Anonymous auth: the benchmark module accepts unauthenticated reducer calls
+/// and carries `entity_id` explicitly in each payload, so we don't need to
+/// persist or reuse an identity token across runs.
+pub(crate) fn connect_spacetimedb(
+    params: &SpacetimeConnectParams,
+) -> Result<Arc<DbConnection>, String> {
+    let conn = DbConnection::builder()
+        .with_uri(&*params.ws_uri)
+        .with_database_name(&*params.database_name)
+        .with_token(Option::<String>::None)
+        .on_connect_error(|_ctx, err| {
+            eprintln!("[stdb] connect error: {err}");
+        })
+        .build()
+        .map_err(|e| format!("DbConnection::build failed: {e}"))?;
+    let conn = Arc::new(conn);
+    let bg = Arc::clone(&conn);
+    tokio::spawn(async move {
+        if let Err(e) = bg.run_async().await {
+            eprintln!("[stdb] run_async terminated: {e}");
+        }
+    });
+    Ok(conn)
 }
 
 #[derive(Clone, Copy)]
@@ -84,12 +115,6 @@ fn random_action(player_idx: u32, total_players: u32, tick: u64) -> GameAction {
             event_type: (seed % 4) as u32,
         },
     }
-}
-
-pub(crate) struct ActionUrls {
-    pub(crate) pickup: String,
-    pub(crate) use_item: String,
-    pub(crate) interact: String,
 }
 
 pub(crate) struct SharedPositions {
@@ -121,10 +146,8 @@ impl SharedPositions {
     }
 }
 
-/// Arguments for [`action_loop`].
 pub(crate) struct SpacetimeActionLoop {
-    pub client: reqwest::Client,
-    pub urls: ActionUrls,
+    pub conn: Arc<DbConnection>,
     pub player_id: uuid::Uuid,
     pub player_idx: u32,
     pub total_players: Arc<AtomicU32>,
@@ -138,8 +161,7 @@ pub(crate) struct SpacetimeActionLoop {
 
 pub(crate) async fn action_loop(ctx: SpacetimeActionLoop) {
     let SpacetimeActionLoop {
-        client,
-        urls,
+        conn,
         player_id,
         player_idx,
         total_players,
@@ -158,6 +180,7 @@ pub(crate) async fn action_loop(ctx: SpacetimeActionLoop) {
     let mut interval = time::interval(Duration::from_micros(interval_us));
     interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
     let mut tick: u64 = 0;
+    let player_stdb = to_stdb_uuid(&player_id);
 
     while !stop.load(Ordering::Relaxed) {
         interval.tick().await;
@@ -170,17 +193,24 @@ pub(crate) async fn action_loop(ctx: SpacetimeActionLoop) {
             burst_remaining = 1;
         }
         for _ in 0..burst_remaining {
-            let (url, body) = match action {
+            let t0 = Instant::now();
+            // SDK reducer calls are fire-and-forget over the already-open WebSocket:
+            // they return immediately after enqueueing the message on the socket,
+            // no server round-trip on this thread. An error from the SDK means the
+            // message wasn't even sent (channel closed, connection lost), not that
+            // the reducer failed.
+            let result: Result<(), String> = match action {
                 GameAction::PickupItem {
                     item_type,
                     quantity,
-                } => (
-                    &urls.pickup,
-                    pickup_item_json(&player_id, item_type, quantity),
-                ),
-                GameAction::UseItem { item_type } => {
-                    (&urls.use_item, use_item_json(&player_id, item_type))
-                }
+                } => conn
+                    .reducers
+                    .pickup_item(player_stdb, item_type, quantity)
+                    .map_err(|e| e.to_string()),
+                GameAction::UseItem { item_type } => conn
+                    .reducers
+                    .use_item(player_stdb, item_type)
+                    .map_err(|e| e.to_string()),
                 GameAction::Interact {
                     target_idx,
                     event_type,
@@ -189,46 +219,20 @@ pub(crate) async fn action_loop(ctx: SpacetimeActionLoop) {
                         .get(target_idx as usize)
                         .copied()
                         .unwrap_or(player_id);
-                    (
-                        &urls.interact,
-                        interact_json(&player_id, &target, event_type),
-                    )
+                    let target_stdb = to_stdb_uuid(&target);
+                    conn.reducers
+                        .player_interact(player_stdb, target_stdb, event_type)
+                        .map_err(|e| e.to_string())
                 }
             };
-
-            let t0 = Instant::now();
-            match client
-                .post(url.as_str())
-                .header("Content-Type", "application/json")
-                .body(body)
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    action_metrics.record_ok(t0.elapsed());
-                }
-                Ok(resp) => {
-                    action_metrics.record_err_kind(ErrorKind::HttpStatus);
-                    if player_idx == 0 {
-                        let s = resp.status();
-                        let t = resp.text().await.unwrap_or_default();
-                        eprintln!("[player 0 action] HTTP {}: {}", s, &t[..t.len().min(200)]);
-                    }
-                }
-                Err(e) => {
-                    let kind = if e.is_timeout() {
-                        ErrorKind::Timeout
-                    } else {
-                        ErrorKind::Transport
-                    };
-                    action_metrics.record_err_kind(kind);
-                }
+            match result {
+                Ok(()) => action_metrics.record_ok(t0.elapsed()),
+                Err(_) => action_metrics.record_err_kind(ErrorKind::Transport),
             }
         }
     }
 }
 
-/// Arguments for [`read_loop_spacetimedb`].
 pub(crate) struct SpacetimeReadLoop {
     pub client: reqwest::Client,
     pub sql_url: String,
@@ -299,12 +303,8 @@ pub(crate) async fn read_loop_spacetimedb(ctx: SpacetimeReadLoop) {
     }
 }
 
-/// Arguments for [`player_loop_spacetimedb`].
 pub(crate) struct SpacetimePlayerLoop {
-    pub client: reqwest::Client,
-    pub url_update_player: String,
-    pub url_update_player_input: String,
-    pub url_remove: String,
+    pub conn: Arc<DbConnection>,
     pub idx: u32,
     pub entity_id: uuid::Uuid,
     pub total: u32,
@@ -320,10 +320,7 @@ pub(crate) struct SpacetimePlayerLoop {
 
 pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
     let SpacetimePlayerLoop {
-        client,
-        url_update_player,
-        url_update_player_input,
-        url_remove,
+        conn,
         idx,
         entity_id,
         total,
@@ -331,7 +328,7 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
         metrics,
         stop,
         cluster_flag,
-        server_physics,
+        server_physics: _server_physics,
         positions,
         burst,
         run_started,
@@ -344,7 +341,9 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
     let mut interval = time::interval(tick_interval);
     interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
+    let player_stdb = to_stdb_uuid(&player.id);
     let mut first_tick = true;
+
     while !stop.load(Ordering::Relaxed) {
         interval.tick().await;
         if is_zone_event_active(run_started.elapsed().as_millis() as u64, burst) {
@@ -352,152 +351,53 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
         }
         player.tick(tick_dt, cluster_flag.load(Ordering::Relaxed));
         positions.set(idx, player.x, player.z);
+
         let t0 = Instant::now();
-        if server_physics {
-            if first_tick {
-                let body = entity_json(
-                    &player.id, player.x, player.y, player.z, player.vx, player.vy, player.vz,
-                );
-                match client
-                    .post(&url_update_player)
-                    .header("Content-Type", "application/json")
-                    .body(body)
-                    .send()
-                    .await
-                {
-                    Ok(resp) if resp.status().is_success() => {
-                        metrics.record_ok(t0.elapsed());
-                    }
-                    Ok(resp) => {
-                        metrics.record_err_kind(ErrorKind::HttpStatus);
-                        if idx == 0 {
-                            let s = resp.status();
-                            let t = resp.text().await.unwrap_or_default();
-                            eprintln!("[player 0] HTTP {}: {}", s, &t[..t.len().min(200)]);
-                        }
-                    }
-                    Err(e) => {
-                        let kind = if e.is_timeout() {
-                            ErrorKind::Timeout
-                        } else {
-                            ErrorKind::Transport
-                        };
-                        metrics.record_err_kind(kind);
-                        if idx == 0 {
-                            eprintln!("[player 0] error: {}", e);
-                        }
-                    }
-                }
-                first_tick = false;
-            } else {
-                let body = player_input_json(&player.id, player.dir_x, player.dir_z);
-                match client
-                    .post(&url_update_player_input)
-                    .header("Content-Type", "application/json")
-                    .body(body)
-                    .send()
-                    .await
-                {
-                    Ok(resp) if resp.status().is_success() => {
-                        metrics.record_ok(t0.elapsed());
-                    }
-                    Ok(resp) => {
-                        metrics.record_err_kind(ErrorKind::HttpStatus);
-                        if idx == 0 {
-                            let s = resp.status();
-                            let t = resp.text().await.unwrap_or_default();
-                            eprintln!("[player 0] HTTP {}: {}", s, &t[..t.len().min(200)]);
-                        }
-                    }
-                    Err(e) => {
-                        let kind = if e.is_timeout() {
-                            ErrorKind::Timeout
-                        } else {
-                            ErrorKind::Transport
-                        };
-                        metrics.record_err_kind(kind);
-                        if idx == 0 {
-                            eprintln!("[player 0] error: {}", e);
-                        }
-                    }
-                }
-            }
+        let result = if first_tick {
+            // Insert the Entity row so subsequent input updates have something to move.
+            let entity = Entity {
+                entity_id: player_stdb,
+                x: player.x,
+                y: player.y,
+                z: player.z,
+            };
+            let r = conn
+                .reducers
+                .update_player(entity)
+                .map_err(|e| e.to_string());
+            first_tick = false;
+            r
         } else {
-            let body = entity_json(
-                &player.id, player.x, player.y, player.z, player.vx, player.vy, player.vz,
-            );
-            match client
-                .post(&url_update_player)
-                .header("Content-Type", "application/json")
-                .body(body)
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    metrics.record_ok(t0.elapsed());
-                }
-                Ok(resp) => {
-                    metrics.record_err_kind(ErrorKind::HttpStatus);
-                    if idx == 0 {
-                        let s = resp.status();
-                        let t = resp.text().await.unwrap_or_default();
-                        eprintln!("[player 0] HTTP {}: {}", s, &t[..t.len().min(200)]);
-                    }
-                }
-                Err(e) => {
-                    let kind = if e.is_timeout() {
-                        ErrorKind::Timeout
-                    } else {
-                        ErrorKind::Transport
-                    };
-                    metrics.record_err_kind(kind);
-                    if idx == 0 {
-                        eprintln!("[player 0] error: {}", e);
-                    }
+            conn.reducers
+                .update_player_input(player_stdb, player.dir_x, player.dir_z)
+                .map_err(|e| e.to_string())
+        };
+        match result {
+            Ok(()) => metrics.record_ok(t0.elapsed()),
+            Err(e) => {
+                metrics.record_err_kind(ErrorKind::Transport);
+                if idx == 0 {
+                    eprintln!("[player 0] SDK reducer error: {e}");
                 }
             }
         }
     }
-    let body = entity_json(&player.id, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    let _ = client
-        .post(&url_remove)
-        .header("Content-Type", "application/json")
-        .body(body)
-        .send()
-        .await;
+
+    // Best-effort removal on shutdown. If the socket is already closed the SDK
+    // returns an error that we just swallow — the benchmark is tearing down.
+    let _ = conn.reducers.remove_player_by_id(player_stdb);
+    let _ = conn.disconnect();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
-
-    fn parse_json_array(body: &str) -> Value {
-        serde_json::from_str(body).expect("valid json payload")
-    }
 
     #[test]
-    fn entity_json_emits_expected_shape() {
-        let id = uuid::Uuid::nil();
-        let body = entity_json(&id, 10.0, 20.0, 30.0, 1.0, 2.0, 3.0);
-        let parsed = parse_json_array(&body);
-        let obj = &parsed[0];
-
-        assert_eq!(obj["entity_id"]["__uuid__"], Value::from(0u64));
-        assert_eq!(obj["x"].as_f64(), Some(10.0));
-        assert_eq!(obj["y"].as_f64(), Some(20.0));
-        assert_eq!(obj["z"].as_f64(), Some(30.0));
-    }
-
-    #[test]
-    fn player_input_json_emits_expected_args() {
-        let id = uuid::Uuid::nil();
-        let body = player_input_json(&id, -1.0, 0.5);
-        let parsed = parse_json_array(&body);
-
-        assert_eq!(parsed[0]["__uuid__"], Value::from(0u64));
-        assert_eq!(parsed[1].as_f64(), Some(-1.0));
-        assert_eq!(parsed[2].as_f64(), Some(0.5));
+    fn to_stdb_uuid_roundtrips_u128() {
+        let id = uuid::Uuid::from_u128(0x1234_5678_9abc_def0_1122_3344_5566_7788);
+        let stdb = to_stdb_uuid(&id);
+        assert_eq!(stdb.as_u128(), id.as_u128());
     }
 
     #[test]

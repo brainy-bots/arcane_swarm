@@ -29,6 +29,7 @@ use arcane_swarm::{
 
 mod backends_arcane;
 mod backends_spacetimedb;
+mod spacetimedb_bindings;
 mod spawn_context;
 
 use spawn_context::{
@@ -50,12 +51,20 @@ pub(crate) trait BackendRuntime: Send + Sync {
         params: &PlayerSpawnParams,
         read_rate: f64,
     ) -> Option<tokio::task::JoinHandle<()>>;
+
+    /// SpacetimeDB-only: hand out the shared SDK connection so the action-loop
+    /// spawner can fire reducers over the same WebSocket. Default `None` for
+    /// backends that handle actions inside their own player_loop (e.g. Arcane).
+    fn spacetimedb_conn(&self) -> Option<Arc<spacetimedb_bindings::DbConnection>> {
+        None
+    }
 }
 
 struct SpacetimeRuntime {
-    url_update_player: String,
-    url_update_player_input: String,
-    url_remove: String,
+    /// Shared SDK connection for every simulated player on this swarm. One WebSocket
+    /// per driver process (anonymous), and `entity_id` is carried in every reducer
+    /// arg — the server doesn't need per-player identities for this benchmark.
+    conn: Arc<spacetimedb_bindings::DbConnection>,
     sql_url: String,
     server_physics: bool,
 }
@@ -72,10 +81,7 @@ impl BackendRuntime for SpacetimeRuntime {
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(backends_spacetimedb::player_loop_spacetimedb(
             backends_spacetimedb::SpacetimePlayerLoop {
-                client: shared.http_client.clone(),
-                url_update_player: self.url_update_player.clone(),
-                url_update_player_input: self.url_update_player_input.clone(),
-                url_remove: self.url_remove.clone(),
+                conn: Arc::clone(&self.conn),
                 idx: params.idx,
                 entity_id: params.entity_id,
                 total: params.desired_total,
@@ -111,6 +117,10 @@ impl BackendRuntime for SpacetimeRuntime {
                 positions: shared.positions.clone(),
             },
         )))
+    }
+
+    fn spacetimedb_conn(&self) -> Option<Arc<spacetimedb_bindings::DbConnection>> {
+        Some(Arc::clone(&self.conn))
     }
 }
 
@@ -163,21 +173,31 @@ impl BackendRuntime for ArcaneRuntime {
 async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     let run_started = std::time::Instant::now();
     let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
-    let base = format!("{}/v1/database/{}/call", stdb_base, cfg.database);
     let sql_url = format!("{}/v1/database/{}/sql", stdb_base, cfg.database);
+    // SDK requires a ws:// or wss:// URI rather than http://.
+    let ws_uri = stdb_base
+        .replacen("https://", "wss://", 1)
+        .replacen("http://", "ws://", 1);
 
     let metrics = Arc::new(Metrics::new());
     let action_metrics = Arc::new(Metrics::new());
     let read_metrics = Arc::new(Metrics::new());
 
     let backend_runtime: Arc<dyn BackendRuntime> = match cfg.backend {
-        Backend::SpacetimeDb => Arc::new(SpacetimeRuntime {
-            url_update_player: format!("{}/update_player", base),
-            url_update_player_input: format!("{}/update_player_input", base),
-            url_remove: format!("{}/remove_player", base),
-            sql_url: sql_url.clone(),
-            server_physics: cfg.server_physics,
-        }),
+        Backend::SpacetimeDb => {
+            let conn = backends_spacetimedb::connect_spacetimedb(
+                &backends_spacetimedb::SpacetimeConnectParams {
+                    ws_uri: ws_uri.clone(),
+                    database_name: cfg.database.clone(),
+                },
+            )
+            .expect("SpacetimeDB connect");
+            Arc::new(SpacetimeRuntime {
+                conn,
+                sql_url: sql_url.clone(),
+                server_physics: cfg.server_physics,
+            })
+        }
         Backend::Arcane => {
             let endpoint = match &cfg.arcane_manager {
                 Some(base) => ArcaneEndpoint::ManagerJoin {
@@ -218,12 +238,6 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
 
     let all_ids: Arc<Vec<uuid::Uuid>> =
         Arc::new((0..max_players).map(|_| uuid::Uuid::new_v4()).collect());
-
-    let action_urls = backends_spacetimedb::ActionUrls {
-        pickup: format!("{}/pickup_item", base),
-        use_item: format!("{}/use_item", base),
-        interact: format!("{}/player_interact", base),
-    };
 
     let http_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -278,7 +292,6 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
             read_rate: cfg.read_rate,
             actions_per_sec: cfg.actions_per_sec,
             max_players,
-            action_urls: &action_urls,
             all_ids: all_ids.clone(),
             total_players_atomic: total_players_atomic.clone(),
             action_metrics: action_metrics.clone(),
@@ -347,7 +360,6 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                     read_rate: cfg.read_rate,
                     actions_per_sec: cfg.actions_per_sec,
                     max_players,
-                    action_urls: &action_urls,
                     all_ids: all_ids.clone(),
                     total_players_atomic: total_players_atomic.clone(),
                     action_metrics: action_metrics.clone(),
@@ -457,21 +469,30 @@ async fn main() {
     let run_started = std::time::Instant::now();
     let tick_interval = Duration::from_micros(1_000_000 / cfg.tick_rate as u64);
     let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
-    let base = format!("{}/v1/database/{}/call", stdb_base, cfg.database);
     let sql_url = format!("{}/v1/database/{}/sql", stdb_base, cfg.database);
+    let ws_uri = stdb_base
+        .replacen("https://", "wss://", 1)
+        .replacen("http://", "ws://", 1);
 
     let metrics = Arc::new(Metrics::new());
     let action_metrics = Arc::new(Metrics::new());
     let read_metrics = Arc::new(Metrics::new());
 
     let backend_runtime: Arc<dyn BackendRuntime> = match cfg.backend {
-        Backend::SpacetimeDb => Arc::new(SpacetimeRuntime {
-            url_update_player: format!("{}/update_player", base),
-            url_update_player_input: format!("{}/update_player_input", base),
-            url_remove: format!("{}/remove_player", base),
-            sql_url: sql_url.clone(),
-            server_physics: cfg.server_physics,
-        }),
+        Backend::SpacetimeDb => {
+            let conn = backends_spacetimedb::connect_spacetimedb(
+                &backends_spacetimedb::SpacetimeConnectParams {
+                    ws_uri: ws_uri.clone(),
+                    database_name: cfg.database.clone(),
+                },
+            )
+            .expect("SpacetimeDB connect");
+            Arc::new(SpacetimeRuntime {
+                conn,
+                sql_url: sql_url.clone(),
+                server_physics: cfg.server_physics,
+            })
+        }
         Backend::Arcane => {
             let endpoint = match &cfg.arcane_manager {
                 Some(base) => ArcaneEndpoint::ManagerJoin {
@@ -516,12 +537,6 @@ async fn main() {
 
     let all_ids: Arc<Vec<uuid::Uuid>> =
         Arc::new((0..cfg.players).map(|_| uuid::Uuid::new_v4()).collect());
-
-    let action_urls = backends_spacetimedb::ActionUrls {
-        pickup: format!("{}/pickup_item", base),
-        use_item: format!("{}/use_item", base),
-        interact: format!("{}/player_interact", base),
-    };
 
     let http_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -574,29 +589,26 @@ async fn main() {
     }
 
     // In Arcane mode, actions go through the WebSocket (handled inside player_loop_arcane).
-    // In SpacetimeDB mode, actions go via HTTP to SpacetimeDB directly.
+    // In SpacetimeDB mode, actions fire reducers on the shared SDK connection.
     if cfg.actions_per_sec > 0.0 && backend_name == "spacetimedb" {
-        for i in 0..cfg.players {
-            let player_id = all_ids[i as usize];
-            handles.push(tokio::spawn(backends_spacetimedb::action_loop(
-                backends_spacetimedb::SpacetimeActionLoop {
-                    client: http_client.clone(),
-                    urls: backends_spacetimedb::ActionUrls {
-                        pickup: action_urls.pickup.clone(),
-                        use_item: action_urls.use_item.clone(),
-                        interact: action_urls.interact.clone(),
+        if let Some(action_conn) = backend_runtime.spacetimedb_conn() {
+            for i in 0..cfg.players {
+                let player_id = all_ids[i as usize];
+                handles.push(tokio::spawn(backends_spacetimedb::action_loop(
+                    backends_spacetimedb::SpacetimeActionLoop {
+                        conn: Arc::clone(&action_conn),
+                        player_id,
+                        player_idx: i,
+                        total_players: total_players_atomic.clone(),
+                        all_ids: all_ids.clone(),
+                        actions_per_sec: cfg.actions_per_sec,
+                        action_metrics: action_metrics.clone(),
+                        stop: stop.clone(),
+                        burst: cfg.burst,
+                        run_started,
                     },
-                    player_id,
-                    player_idx: i,
-                    total_players: total_players_atomic.clone(),
-                    all_ids: all_ids.clone(),
-                    actions_per_sec: cfg.actions_per_sec,
-                    action_metrics: action_metrics.clone(),
-                    stop: stop.clone(),
-                    burst: cfg.burst,
-                    run_started,
-                },
-            )));
+                )));
+            }
         }
     }
 
