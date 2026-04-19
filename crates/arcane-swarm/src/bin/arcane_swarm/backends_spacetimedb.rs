@@ -9,20 +9,28 @@
 //! revision of this file used `reqwest::Client::post(...)` per reducer call —
 //! which is the "CLI / tests" pipe, not the pipe a game client would use.
 //!
-//! ## One WebSocket per simulated player
+//! ## One WebSocket per simulated player — shared between movement and actions
 //!
 //! The benchmark's premise is "N independent game clients drive N players."
-//! Each simulated player opens its own `DbConnection`. An earlier revision
-//! multiplexed every player through a single shared WebSocket — the client
-//! reported 0 errors, but SpacetimeDB's per-client `incoming_queue_length`
-//! limit (16384 messages) silently overflowed once aggregate traffic passed
-//! that rate. Every call beyond the limit was dropped server-side while the
-//! SDK's fire-and-forget API happily returned Ok. We found this via the
-//! post-run `SELECT COUNT(*) FROM game_event` not matching the action calls
-//! the swarm thought it sent. One WS per player keeps each connection's rate
-//! to its own 20 Hz + ~2 Hz action mix — well under any per-client server
-//! limit, and mirrors how real game clients actually talk to a SpacetimeDB
-//! backend.
+//! Each simulated player opens exactly one `DbConnection` that carries BOTH
+//! the movement reducer calls (20 Hz) and the game-action reducer calls
+//! (~2 Hz). This mirrors `backends_arcane.rs`, where the same WebSocket sends
+//! movement and actions, and it matches how a real game client would talk to
+//! a SpacetimeDB backend.
+//!
+//! An earlier revision multiplexed every player through one shared WebSocket —
+//! the client reported 0 errors, but SpacetimeDB's per-client
+//! `incoming_queue_length` limit (16384 messages) silently overflowed once
+//! aggregate traffic passed that rate. Every call beyond the limit was dropped
+//! server-side while the SDK's fire-and-forget API happily returned Ok. We
+//! fixed that by moving to one WS per player (22 msg/sec per connection, 750×
+//! under the limit).
+//!
+//! A later revision opened two WebSockets per player (one for movement, one
+//! for actions) because the loops were structured as independent tasks. That
+//! doubled socket count with no scaling benefit: the Arcane comparison already
+//! uses one WS per player, so the extra sockets were pure benchmark-fairness
+//! noise. This revision collapses them back to one.
 //!
 //! ## What still uses HTTP
 //!
@@ -158,102 +166,6 @@ impl SharedPositions {
     }
 }
 
-pub(crate) struct SpacetimeActionLoop {
-    /// Each simulated player opens its own WebSocket; `connect_params` lets the
-    /// action loop build its dedicated connection when it spawns.
-    pub connect_params: SpacetimeConnectParams,
-    pub player_id: uuid::Uuid,
-    pub player_idx: u32,
-    pub total_players: Arc<AtomicU32>,
-    pub all_ids: Arc<Vec<uuid::Uuid>>,
-    pub actions_per_sec: f64,
-    pub action_metrics: Arc<Metrics>,
-    pub stop: Arc<AtomicBool>,
-    pub burst: BurstConfig,
-    pub run_started: Instant,
-}
-
-pub(crate) async fn action_loop(ctx: SpacetimeActionLoop) {
-    let SpacetimeActionLoop {
-        connect_params,
-        player_id,
-        player_idx,
-        total_players,
-        all_ids,
-        actions_per_sec,
-        action_metrics,
-        stop,
-        burst,
-        run_started,
-    } = ctx;
-
-    if actions_per_sec <= 0.0 {
-        return;
-    }
-    let conn = match connect_spacetimedb(&connect_params) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[stdb action] connect failed for player {player_idx}: {e}");
-            return;
-        }
-    };
-    let interval_us = (1_000_000.0 / actions_per_sec) as u64;
-    let mut interval = time::interval(Duration::from_micros(interval_us));
-    interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-    let mut tick: u64 = 0;
-    let player_stdb = to_stdb_uuid(&player_id);
-
-    while !stop.load(Ordering::Relaxed) {
-        interval.tick().await;
-        tick += 1;
-        let total_now = total_players.load(Ordering::Relaxed);
-        let action = random_action(player_idx, total_now, tick);
-        let mut burst_remaining =
-            burst_actions_to_emit(player_idx, run_started.elapsed().as_millis() as u64, burst);
-        if burst_remaining == 0 {
-            burst_remaining = 1;
-        }
-        for _ in 0..burst_remaining {
-            let t0 = Instant::now();
-            // SDK reducer calls are fire-and-forget over the already-open WebSocket:
-            // they return immediately after enqueueing the message on the socket,
-            // no server round-trip on this thread. An error from the SDK means the
-            // message wasn't even sent (channel closed, connection lost), not that
-            // the reducer failed.
-            let result: Result<(), String> = match action {
-                GameAction::PickupItem {
-                    item_type,
-                    quantity,
-                } => conn
-                    .reducers
-                    .pickup_item(player_stdb, item_type, quantity)
-                    .map_err(|e| e.to_string()),
-                GameAction::UseItem { item_type } => conn
-                    .reducers
-                    .use_item(player_stdb, item_type)
-                    .map_err(|e| e.to_string()),
-                GameAction::Interact {
-                    target_idx,
-                    event_type,
-                } => {
-                    let target = all_ids
-                        .get(target_idx as usize)
-                        .copied()
-                        .unwrap_or(player_id);
-                    let target_stdb = to_stdb_uuid(&target);
-                    conn.reducers
-                        .player_interact(player_stdb, target_stdb, event_type)
-                        .map_err(|e| e.to_string())
-                }
-            };
-            match result {
-                Ok(()) => action_metrics.record_ok(t0.elapsed()),
-                Err(_) => action_metrics.record_err_kind(ErrorKind::Transport),
-            }
-        }
-    }
-}
-
 pub(crate) struct SpacetimeReadLoop {
     pub client: reqwest::Client,
     pub sql_url: String,
@@ -325,18 +237,23 @@ pub(crate) async fn read_loop_spacetimedb(ctx: SpacetimeReadLoop) {
 }
 
 pub(crate) struct SpacetimePlayerLoop {
-    /// One dedicated WebSocket per simulated player. Opened inside
-    /// `player_loop_spacetimedb` so every task drives its own connection.
+    /// One dedicated WebSocket per simulated player — shared between movement
+    /// and action reducer calls. Opened inside `player_loop_spacetimedb` so
+    /// every task drives its own connection.
     pub connect_params: SpacetimeConnectParams,
     pub idx: u32,
     pub entity_id: uuid::Uuid,
     pub total: u32,
     pub tick_interval: Duration,
     pub metrics: Arc<Metrics>,
+    pub action_metrics: Arc<Metrics>,
     pub stop: Arc<AtomicBool>,
     pub cluster_flag: Arc<AtomicBool>,
     pub server_physics: bool,
     pub positions: Arc<SharedPositions>,
+    pub all_ids: Arc<Vec<uuid::Uuid>>,
+    pub total_players: Arc<AtomicU32>,
+    pub actions_per_sec: f64,
     pub burst: BurstConfig,
     pub run_started: Instant,
 }
@@ -349,10 +266,14 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
         total,
         tick_interval,
         metrics,
+        action_metrics,
         stop,
         cluster_flag,
         server_physics: _server_physics,
         positions,
+        all_ids,
+        total_players,
+        actions_per_sec,
         burst,
         run_started,
     } = ctx;
@@ -378,6 +299,17 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
     let player_stdb = to_stdb_uuid(&player.id);
     let mut first_tick = true;
 
+    // Action timing: emit game actions at configured rate via the same
+    // WebSocket as movement, driven off the movement tick (mirrors
+    // `backends_arcane.rs`).
+    let action_interval_us = if actions_per_sec > 0.0 {
+        Some((1_000_000.0 / actions_per_sec) as u64)
+    } else {
+        None
+    };
+    let mut last_action = Instant::now();
+    let mut action_tick: u64 = 0;
+
     while !stop.load(Ordering::Relaxed) {
         interval.tick().await;
         if is_zone_event_active(run_started.elapsed().as_millis() as u64, burst) {
@@ -386,6 +318,7 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
         player.tick(tick_dt, cluster_flag.load(Ordering::Relaxed));
         positions.set(idx, player.x, player.z);
 
+        // Movement reducer call
         let t0 = Instant::now();
         let result = if first_tick {
             // Insert the Entity row so subsequent input updates have something to move.
@@ -413,6 +346,54 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
                 if idx == 0 {
                     eprintln!("[player 0] SDK reducer error: {e}");
                 }
+            }
+        }
+
+        // Action reducer calls (same connection, time-gated)
+        if let Some(interval_us) = action_interval_us {
+            if last_action.elapsed() >= Duration::from_micros(interval_us) {
+                action_tick += 1;
+                let total_now = total_players.load(Ordering::Relaxed);
+                let action = random_action(idx, total_now, action_tick);
+                let mut burst_remaining =
+                    burst_actions_to_emit(idx, run_started.elapsed().as_millis() as u64, burst);
+                if burst_remaining == 0 {
+                    burst_remaining = 1;
+                }
+                for _ in 0..burst_remaining {
+                    let a0 = Instant::now();
+                    let result: Result<(), String> = match action {
+                        GameAction::PickupItem {
+                            item_type,
+                            quantity,
+                        } => conn
+                            .reducers
+                            .pickup_item(player_stdb, item_type, quantity)
+                            .map_err(|e| e.to_string()),
+                        GameAction::UseItem { item_type } => conn
+                            .reducers
+                            .use_item(player_stdb, item_type)
+                            .map_err(|e| e.to_string()),
+                        GameAction::Interact {
+                            target_idx,
+                            event_type,
+                        } => {
+                            let target = all_ids
+                                .get(target_idx as usize)
+                                .copied()
+                                .unwrap_or(entity_id);
+                            let target_stdb = to_stdb_uuid(&target);
+                            conn.reducers
+                                .player_interact(player_stdb, target_stdb, event_type)
+                                .map_err(|e| e.to_string())
+                        }
+                    };
+                    match result {
+                        Ok(()) => action_metrics.record_ok(a0.elapsed()),
+                        Err(_) => action_metrics.record_err_kind(ErrorKind::Transport),
+                    }
+                }
+                last_action = Instant::now();
             }
         }
     }

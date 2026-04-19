@@ -37,6 +37,11 @@ use spawn_context::{
 };
 
 /// Backend-specific runtime selected at startup (`spacetimedb` vs `arcane`). Binary-internal only; CLI and wire formats are unchanged.
+///
+/// Both backends carry movement and action reducer calls on one WebSocket per
+/// simulated player, so `spawn_player` owns the entire per-player lifecycle
+/// (connect, movement loop, action loop, disconnect). There is no separate
+/// action spawn.
 pub(crate) trait BackendRuntime: Send + Sync {
     fn name(&self) -> &'static str;
     fn spawn_player(
@@ -51,13 +56,6 @@ pub(crate) trait BackendRuntime: Send + Sync {
         params: &PlayerSpawnParams,
         read_rate: f64,
     ) -> Option<tokio::task::JoinHandle<()>>;
-
-    /// SpacetimeDB-only: hand out the connection params so the action-loop
-    /// spawner can open its own WebSocket per player. Default `None` for
-    /// backends that handle actions inside their own player_loop (e.g. Arcane).
-    fn spacetimedb_connect_params(&self) -> Option<backends_spacetimedb::SpacetimeConnectParams> {
-        None
-    }
 }
 
 struct SpacetimeRuntime {
@@ -88,10 +86,14 @@ impl BackendRuntime for SpacetimeRuntime {
                 total: params.desired_total,
                 tick_interval: params.tick_interval,
                 metrics: shared.metrics.clone(),
+                action_metrics: shared.action_metrics.clone(),
                 stop: params.stop,
                 cluster_flag: shared.cluster_flag.clone(),
                 server_physics: self.server_physics,
                 positions: shared.positions.clone(),
+                all_ids: shared.all_ids.clone(),
+                total_players: shared.total_players.clone(),
+                actions_per_sec: shared.actions_per_sec,
                 burst: shared.burst,
                 run_started: shared.run_started,
             },
@@ -119,16 +121,10 @@ impl BackendRuntime for SpacetimeRuntime {
             },
         )))
     }
-
-    fn spacetimedb_connect_params(&self) -> Option<backends_spacetimedb::SpacetimeConnectParams> {
-        Some(self.connect_params.clone())
-    }
 }
 
 struct ArcaneRuntime {
     endpoint: ArcaneEndpoint,
-    action_metrics: Arc<Metrics>,
-    actions_per_sec: f64,
 }
 
 impl BackendRuntime for ArcaneRuntime {
@@ -151,10 +147,10 @@ impl BackendRuntime for ArcaneRuntime {
                 tick_interval: params.tick_interval,
                 metrics: shared.metrics.clone(),
                 read_metrics: shared.read_metrics.clone(),
-                action_metrics: self.action_metrics.clone(),
+                action_metrics: shared.action_metrics.clone(),
                 stop: params.stop,
                 cluster_flag: shared.cluster_flag.clone(),
-                actions_per_sec: self.actions_per_sec,
+                actions_per_sec: shared.actions_per_sec,
                 burst: shared.burst,
                 run_started: shared.run_started,
             },
@@ -200,11 +196,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                 },
                 None => ArcaneEndpoint::SingleUrl(cfg.arcane_ws.clone()),
             };
-            Arc::new(ArcaneRuntime {
-                endpoint,
-                action_metrics: action_metrics.clone(),
-                actions_per_sec: cfg.actions_per_sec,
-            })
+            Arc::new(ArcaneRuntime { endpoint })
         }
     };
     let backend_name = backend_runtime.name();
@@ -227,9 +219,11 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     let stop_all = Arc::new(AtomicBool::new(false));
 
     let max_players = cfg.max_players;
-    // 0..max => player tasks, max..2*max => action tasks
+    // One task slot per simulated player — the player loop carries both
+    // movement and actions on the same WebSocket, so there are no separate
+    // action-task slots.
     let mut handles: Vec<Option<tokio::task::JoinHandle<()>>> =
-        (0..(max_players as usize * 2)).map(|_| None).collect();
+        (0..max_players as usize).map(|_| None).collect();
 
     let all_ids: Arc<Vec<uuid::Uuid>> =
         Arc::new((0..max_players).map(|_| uuid::Uuid::new_v4()).collect());
@@ -265,13 +259,18 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         http_client: http_client.clone(),
         metrics: metrics.clone(),
         read_metrics: read_metrics.clone(),
+        action_metrics: action_metrics.clone(),
         cluster_flag: cluster_flag.clone(),
         positions: positions.clone(),
+        all_ids: all_ids.clone(),
+        total_players: total_players_atomic.clone(),
+        actions_per_sec: cfg.actions_per_sec,
         burst: cfg.burst,
         run_started,
     };
 
-    // Spawn initial players (and their optional read/action tasks).
+    // Spawn initial players (and their optional read task — actions share the
+    // movement WebSocket and are driven from inside the player loop).
     let initial = desired_players.load(Ordering::Relaxed) as usize;
     let mut current_spawned: usize = 0;
 
@@ -285,11 +284,6 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
             backend_runtime: &backend_runtime,
             tick_interval,
             read_rate: cfg.read_rate,
-            actions_per_sec: cfg.actions_per_sec,
-            max_players,
-            all_ids: all_ids.clone(),
-            total_players_atomic: total_players_atomic.clone(),
-            action_metrics: action_metrics.clone(),
         };
         spawn_control_mode_player(&mut kit, idx, desired_total);
         current_spawned += 1;
@@ -353,11 +347,6 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                     backend_runtime: &backend_runtime,
                     tick_interval,
                     read_rate: cfg.read_rate,
-                    actions_per_sec: cfg.actions_per_sec,
-                    max_players,
-                    all_ids: all_ids.clone(),
-                    total_players_atomic: total_players_atomic.clone(),
-                    action_metrics: action_metrics.clone(),
                 };
                 spawn_control_mode_player(&mut kit, idx, desired_total);
             }
@@ -489,11 +478,7 @@ async fn main() {
                 },
                 None => ArcaneEndpoint::SingleUrl(cfg.arcane_ws.clone()),
             };
-            Arc::new(ArcaneRuntime {
-                endpoint,
-                action_metrics: action_metrics.clone(),
-                actions_per_sec: cfg.actions_per_sec,
-            })
+            Arc::new(ArcaneRuntime { endpoint })
         }
     };
     let backend_name = backend_runtime.name();
@@ -522,7 +507,7 @@ async fn main() {
 
     let stop = Arc::new(AtomicBool::new(false));
     let total_players_atomic = Arc::new(AtomicU32::new(cfg.players));
-    let mut handles = Vec::with_capacity(cfg.players as usize * 3);
+    let mut handles = Vec::with_capacity(cfg.players as usize);
 
     let all_ids: Arc<Vec<uuid::Uuid>> =
         Arc::new((0..cfg.players).map(|_| uuid::Uuid::new_v4()).collect());
@@ -559,8 +544,12 @@ async fn main() {
         http_client: http_client.clone(),
         metrics: metrics.clone(),
         read_metrics: read_metrics.clone(),
+        action_metrics: action_metrics.clone(),
         cluster_flag: cfg.cluster_command.clone(),
         positions: positions.clone(),
+        all_ids: all_ids.clone(),
+        total_players: total_players_atomic.clone(),
+        actions_per_sec: cfg.actions_per_sec,
         burst: cfg.burst,
         run_started,
     };
@@ -575,30 +564,6 @@ async fn main() {
         };
         handles.push(backend_runtime.spawn_player(&loop_shared, params.clone()));
         let _ = backend_runtime.spawn_read(&loop_shared, &params, cfg.read_rate);
-    }
-
-    // In Arcane mode, actions go through the WebSocket (handled inside player_loop_arcane).
-    // In SpacetimeDB mode, actions fire reducers on the shared SDK connection.
-    if cfg.actions_per_sec > 0.0 && backend_name == "spacetimedb" {
-        if let Some(action_connect) = backend_runtime.spacetimedb_connect_params() {
-            for i in 0..cfg.players {
-                let player_id = all_ids[i as usize];
-                handles.push(tokio::spawn(backends_spacetimedb::action_loop(
-                    backends_spacetimedb::SpacetimeActionLoop {
-                        connect_params: action_connect.clone(),
-                        player_id,
-                        player_idx: i,
-                        total_players: total_players_atomic.clone(),
-                        all_ids: all_ids.clone(),
-                        actions_per_sec: cfg.actions_per_sec,
-                        action_metrics: action_metrics.clone(),
-                        stop: stop.clone(),
-                        burst: cfg.burst,
-                        run_started,
-                    },
-                )));
-            }
-        }
     }
 
     let csv_file = cfg.csv_path.as_ref().map(|p| {
