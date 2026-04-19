@@ -18,6 +18,11 @@ uuid = { version = "1", features = ["v4"] }
 # stays in sync. Bindings live in src/bin/arcane_swarm/spacetimedb_bindings/ and are
 # produced by `spacetime generate --lang rust --module-path <full module>`.
 spacetimedb-sdk = "2.1"
+# Shared wire schema with the cluster (arcane repo). Pinned to main so
+# the benchmark tracks the latest protocol; the benchmark workspace pins
+# both arcane and arcane_swarm as submodules, so this resolves to the
+# same commit in the benchmark CI.
+arcane-wire = { git = "https://github.com/brainy-bots/arcane.git", branch = "main" }
 
 [[bin]]
 name = "arcane-swarm"
