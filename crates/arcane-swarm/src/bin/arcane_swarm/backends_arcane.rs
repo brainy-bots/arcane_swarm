@@ -11,7 +11,7 @@ use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
 
 use arcane_swarm::{
-    game_action_json, is_zone_event_active, player_state_json, ArcaneEndpoint, BurstConfig,
+    encode_game_action, encode_player_state, is_zone_event_active, ArcaneEndpoint, BurstConfig,
     ErrorKind, Metrics, Player,
 };
 
@@ -194,12 +194,13 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
         }
         player.tick(tick_dt, cluster_flag.load(Ordering::Relaxed));
 
-        // Send movement
-        let msg = player_state_json(
+        // Send movement — binary postcard frame for fairness with SpacetimeDB's
+        // BSATN. See brainy-bots/arcane#28 for motivation.
+        let msg = encode_player_state(
             &player.id, player.x, player.y, player.z, player.vx, player.vy, player.vz,
         );
         let t0 = std::time::Instant::now();
-        match sink.send(Message::Text(msg)).await {
+        match sink.send(Message::Binary(msg)).await {
             Ok(_) => {
                 metrics.record_ok(t0.elapsed());
             }
@@ -212,14 +213,16 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
             }
         }
 
-        // Send game action if it's time
+        // Send game action if it's time. Action payload is already a JSON
+        // string (from random_arcane_action); we pass its bytes through
+        // opaquely — the cluster deserializes on the other side.
         if let Some(interval_us) = action_interval_us {
             if last_action.elapsed() >= Duration::from_micros(interval_us) {
                 action_tick += 1;
                 let (action_type, payload) = random_arcane_action(idx, action_tick);
-                let action_msg = game_action_json(&player.id, action_type, &payload);
+                let action_msg = encode_game_action(&player.id, action_type, payload.as_bytes());
                 let t0 = std::time::Instant::now();
-                match sink.send(Message::Text(action_msg)).await {
+                match sink.send(Message::Binary(action_msg)).await {
                     Ok(_) => {
                         action_metrics.record_ok(t0.elapsed());
                     }
