@@ -10,6 +10,40 @@ use tokio::time;
 
 use crate::metrics::{ErrorBreakdown, Metrics, MetricsSnapshot};
 
+/// One snapshot of the driver process's CPU + RSS usage. Linux-only; returns
+/// `None` on other platforms or if the procfs read/parse fails.
+///
+/// `cpu_ticks` is the sum of utime + stime from `/proc/self/stat`, in kernel
+/// clock ticks (USER_HZ, conventionally 100 per second on Linux). Compare
+/// successive samples over a known wall-time interval to get CPU fraction.
+///
+/// `rss_kb` is `VmRSS` from `/proc/self/status` (resident memory in kB).
+#[cfg(target_os = "linux")]
+fn sample_proc() -> Option<(u64, u64)> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    // `comm` (field 2) may contain spaces and parens — split after the final ')'.
+    let after = stat.rfind(')').map(|i| &stat[i + 1..])?;
+    let mut fields = after.split_whitespace();
+    // Fields after `)`: state, ppid, pgrp, session, tty_nr, tpgid, flags,
+    // minflt, cminflt, majflt, cmajflt, utime, stime, ...
+    let utime: u64 = fields.nth(11)?.parse().ok()?;
+    let stime: u64 = fields.next()?.parse().ok()?;
+
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let rss_kb: u64 = status
+        .lines()
+        .find(|l| l.starts_with("VmRSS:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|n| n.parse().ok())?;
+
+    Some((utime + stime, rss_kb))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sample_proc() -> Option<(u64, u64)> {
+    None
+}
+
 /// Arguments for [`run_reporter`].
 pub struct ReporterConfig<'a> {
     pub metrics: Arc<Metrics>,
@@ -60,6 +94,10 @@ pub async fn run_reporter(cfg: ReporterConfig<'_>) {
     let mut total_action_calls: u64 = 0;
     let mut total_action_oks: u64 = 0;
     let mut total_action_errs: u64 = 0;
+    // Driver telemetry: track previous CPU-tick sample so we can report CPU% over
+    // the 1s reporter interval. First iteration has nothing to diff against, so
+    // we display 0.0% until we have a baseline.
+    let mut prev_cpu_ticks: Option<u64> = None;
     loop {
         interval.tick().await;
         let s = metrics.snapshot_and_reset();
@@ -88,6 +126,22 @@ pub async fn run_reporter(cfg: ReporterConfig<'_>) {
         total_action_calls += a.ok + a.err;
         total_action_oks += a.ok;
         total_action_errs += a.err;
+
+        // Driver CPU/RSS sample. Linux-only procfs read; on other platforms
+        // `sample_proc()` returns None and we just skip the driver columns.
+        // USER_HZ is conventionally 100 on Linux, so a 1s delta of N ticks ≈
+        // N% of one core. At 800% we're saturating 8 cores.
+        let (drv_cpu_pct, drv_rss_mb) = match sample_proc() {
+            Some((cpu_ticks, rss_kb)) => {
+                let cpu_pct = match prev_cpu_ticks {
+                    Some(prev) => cpu_ticks.saturating_sub(prev) as f64,
+                    None => 0.0,
+                };
+                prev_cpu_ticks = Some(cpu_ticks);
+                (Some(cpu_pct), Some(rss_kb as f64 / 1024.0))
+            }
+            None => (None, None),
+        };
 
         let mut line = format!(
             "[{:>4}s] [{}] players={} writes/s={} ok={} err={} lat={:.1}ms",
@@ -121,13 +175,20 @@ pub async fn run_reporter(cfg: ReporterConfig<'_>) {
             ));
         }
 
+        if let (Some(cpu), Some(rss)) = (drv_cpu_pct, drv_rss_mb) {
+            line.push_str(&format!(" | drv_cpu={:.1}% drv_rss={:.0}MB", cpu, rss));
+        }
+
         eprintln!("{}", line);
 
         if let Some(ref mut w) = *csv_file.lock().await {
             use std::io::Write;
+            // Last two columns (drv_cpu_pct, drv_rss_mb) are empty on platforms
+            // where sample_proc() returns None — parsers should treat empty as
+            // "not measured."
             let _ = writeln!(
                 w,
-                "{},{},{},{},{},{:.2},{:.2},{},{},{},{:.2},{},{},{},{:.2}",
+                "{},{},{},{},{},{:.2},{:.2},{},{},{},{:.2},{},{},{},{:.2},{},{}",
                 elapsed,
                 players,
                 s.ok,
@@ -143,6 +204,8 @@ pub async fn run_reporter(cfg: ReporterConfig<'_>) {
                 a.ok,
                 a.err,
                 a.avg_latency_us as f64 / 1000.0,
+                drv_cpu_pct.map(|c| format!("{:.2}", c)).unwrap_or_default(),
+                drv_rss_mb.map(|m| format!("{:.0}", m)).unwrap_or_default(),
             );
             let _ = w.flush();
         }
