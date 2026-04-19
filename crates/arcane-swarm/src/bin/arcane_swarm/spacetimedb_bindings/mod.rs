@@ -4,57 +4,52 @@
 // This was generated using spacetimedb cli version 2.1.0 (commit 6981f48b4bc1a71c8dd9bdfe5a2c343f6370243d).
 
 #![allow(unused, clippy::all)]
-use spacetimedb_sdk::__codegen::{
-	self as __sdk,
-	__lib,
-	__sats,
-	__ws,
-};
+use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 pub mod active_buff_type;
-pub mod cleanup_timer_type;
-pub mod entity_type;
-pub mod game_event_type;
-pub mod health_type;
-pub mod inventory_type;
-pub mod physics_timer_type;
-pub mod player_input_type;
-pub mod tick_counter_type;
 pub mod apply_damage_reducer;
 pub mod cleanup_old_events_reducer;
+pub mod cleanup_timer_type;
+pub mod entity_table;
+pub mod entity_type;
+pub mod game_event_table;
+pub mod game_event_type;
+pub mod health_table;
+pub mod health_type;
+pub mod inventory_table;
+pub mod inventory_type;
+pub mod physics_timer_type;
 pub mod pickup_item_reducer;
+pub mod player_input_type;
 pub mod player_interact_reducer;
 pub mod remove_player_by_id_reducer;
 pub mod set_entities_reducer;
-pub mod update_player_reducer;
+pub mod tick_counter_type;
 pub mod update_player_input_reducer;
+pub mod update_player_reducer;
 pub mod use_item_reducer;
-pub mod entity_table;
-pub mod game_event_table;
-pub mod health_table;
-pub mod inventory_table;
 
 pub use active_buff_type::ActiveBuff;
-pub use cleanup_timer_type::CleanupTimer;
-pub use entity_type::Entity;
-pub use game_event_type::GameEvent;
-pub use health_type::Health;
-pub use inventory_type::Inventory;
-pub use physics_timer_type::PhysicsTimer;
-pub use player_input_type::PlayerInput;
-pub use tick_counter_type::TickCounter;
-pub use entity_table::*;
-pub use game_event_table::*;
-pub use health_table::*;
-pub use inventory_table::*;
 pub use apply_damage_reducer::apply_damage;
 pub use cleanup_old_events_reducer::cleanup_old_events;
+pub use cleanup_timer_type::CleanupTimer;
+pub use entity_table::*;
+pub use entity_type::Entity;
+pub use game_event_table::*;
+pub use game_event_type::GameEvent;
+pub use health_table::*;
+pub use health_type::Health;
+pub use inventory_table::*;
+pub use inventory_type::Inventory;
+pub use physics_timer_type::PhysicsTimer;
 pub use pickup_item_reducer::pickup_item;
+pub use player_input_type::PlayerInput;
 pub use player_interact_reducer::player_interact;
 pub use remove_player_by_id_reducer::remove_player_by_id;
 pub use set_entities_reducer::set_entities;
-pub use update_player_reducer::update_player;
+pub use tick_counter_type::TickCounter;
 pub use update_player_input_reducer::update_player_input;
+pub use update_player_reducer::update_player;
 pub use use_item_reducer::use_item;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -65,43 +60,42 @@ pub use use_item_reducer::use_item;
 /// to indicate which reducer caused the event.
 
 pub enum Reducer {
-        ApplyDamage {
+    ApplyDamage {
         target_id: __sdk::Uuid,
         amount: u32,
-}    ,
+    },
     CleanupOldEvents {
         max_age_secs: u64,
-}    ,
+    },
     PickupItem {
         owner_id: __sdk::Uuid,
         item_type: u32,
         quantity: u32,
-}    ,
+    },
     PlayerInteract {
         actor_id: __sdk::Uuid,
         target_id: __sdk::Uuid,
         event_type: u32,
-}    ,
+    },
     RemovePlayerById {
         entity_id: __sdk::Uuid,
-}    ,
+    },
     SetEntities {
-        entities: Vec::<Entity>,
-}    ,
+        entities: Vec<Entity>,
+    },
     UpdatePlayer {
         entity: Entity,
-}    ,
+    },
     UpdatePlayerInput {
         entity_id: __sdk::Uuid,
         dir_x: f64,
         dir_z: f64,
-}    ,
+    },
     UseItem {
         owner_id: __sdk::Uuid,
         item_type: u32,
-}    ,
+    },
 }
-
 
 impl __sdk::InModule for Reducer {
     type Module = RemoteModule;
@@ -110,7 +104,7 @@ impl __sdk::InModule for Reducer {
 impl __sdk::Reducer for Reducer {
     fn reducer_name(&self) -> &'static str {
         match self {
-                        Reducer::ApplyDamage { .. } => "apply_damage",
+            Reducer::ApplyDamage { .. } => "apply_damage",
             Reducer::CleanupOldEvents { .. } => "cleanup_old_events",
             Reducer::PickupItem { .. } => "pickup_item",
             Reducer::PlayerInteract { .. } => "player_interact",
@@ -120,87 +114,85 @@ impl __sdk::Reducer for Reducer {
             Reducer::UpdatePlayerInput { .. } => "update_player_input",
             Reducer::UseItem { .. } => "use_item",
             _ => unreachable!(),
-}
-}
+        }
+    }
     #[allow(clippy::clone_on_copy)]
-fn args_bsatn(&self) -> Result<Vec<u8>, __sats::bsatn::EncodeError> {
+    fn args_bsatn(&self) -> Result<Vec<u8>, __sats::bsatn::EncodeError> {
         match self {
-                        Reducer::ApplyDamage{
-                target_id,
-                amount,
-}             => __sats::bsatn::to_vec(&apply_damage_reducer::ApplyDamageArgs {
-                target_id: target_id.clone(),
-                amount: amount.clone(),
-}),
-            Reducer::CleanupOldEvents{
-                max_age_secs,
-}             => __sats::bsatn::to_vec(&cleanup_old_events_reducer::CleanupOldEventsArgs {
-                max_age_secs: max_age_secs.clone(),
-}),
-            Reducer::PickupItem{
+            Reducer::ApplyDamage { target_id, amount } => {
+                __sats::bsatn::to_vec(&apply_damage_reducer::ApplyDamageArgs {
+                    target_id: target_id.clone(),
+                    amount: amount.clone(),
+                })
+            }
+            Reducer::CleanupOldEvents { max_age_secs } => {
+                __sats::bsatn::to_vec(&cleanup_old_events_reducer::CleanupOldEventsArgs {
+                    max_age_secs: max_age_secs.clone(),
+                })
+            }
+            Reducer::PickupItem {
                 owner_id,
                 item_type,
                 quantity,
-}             => __sats::bsatn::to_vec(&pickup_item_reducer::PickupItemArgs {
+            } => __sats::bsatn::to_vec(&pickup_item_reducer::PickupItemArgs {
                 owner_id: owner_id.clone(),
                 item_type: item_type.clone(),
                 quantity: quantity.clone(),
-}),
-            Reducer::PlayerInteract{
+            }),
+            Reducer::PlayerInteract {
                 actor_id,
                 target_id,
                 event_type,
-}             => __sats::bsatn::to_vec(&player_interact_reducer::PlayerInteractArgs {
+            } => __sats::bsatn::to_vec(&player_interact_reducer::PlayerInteractArgs {
                 actor_id: actor_id.clone(),
                 target_id: target_id.clone(),
                 event_type: event_type.clone(),
-}),
-            Reducer::RemovePlayerById{
-                entity_id,
-}             => __sats::bsatn::to_vec(&remove_player_by_id_reducer::RemovePlayerByIdArgs {
-                entity_id: entity_id.clone(),
-}),
-            Reducer::SetEntities{
-                entities,
-}             => __sats::bsatn::to_vec(&set_entities_reducer::SetEntitiesArgs {
-                entities: entities.clone(),
-}),
-            Reducer::UpdatePlayer{
-                entity,
-}             => __sats::bsatn::to_vec(&update_player_reducer::UpdatePlayerArgs {
-                entity: entity.clone(),
-}),
-            Reducer::UpdatePlayerInput{
+            }),
+            Reducer::RemovePlayerById { entity_id } => {
+                __sats::bsatn::to_vec(&remove_player_by_id_reducer::RemovePlayerByIdArgs {
+                    entity_id: entity_id.clone(),
+                })
+            }
+            Reducer::SetEntities { entities } => {
+                __sats::bsatn::to_vec(&set_entities_reducer::SetEntitiesArgs {
+                    entities: entities.clone(),
+                })
+            }
+            Reducer::UpdatePlayer { entity } => {
+                __sats::bsatn::to_vec(&update_player_reducer::UpdatePlayerArgs {
+                    entity: entity.clone(),
+                })
+            }
+            Reducer::UpdatePlayerInput {
                 entity_id,
                 dir_x,
                 dir_z,
-}             => __sats::bsatn::to_vec(&update_player_input_reducer::UpdatePlayerInputArgs {
+            } => __sats::bsatn::to_vec(&update_player_input_reducer::UpdatePlayerInputArgs {
                 entity_id: entity_id.clone(),
                 dir_x: dir_x.clone(),
                 dir_z: dir_z.clone(),
-}),
-            Reducer::UseItem{
+            }),
+            Reducer::UseItem {
                 owner_id,
                 item_type,
-}             => __sats::bsatn::to_vec(&use_item_reducer::UseItemArgs {
+            } => __sats::bsatn::to_vec(&use_item_reducer::UseItemArgs {
                 owner_id: owner_id.clone(),
                 item_type: item_type.clone(),
-}),
+            }),
             _ => unreachable!(),
-}
-}
+        }
+    }
 }
 
 #[derive(Default, Debug)]
 #[allow(non_snake_case)]
 #[doc(hidden)]
 pub struct DbUpdate {
-        entity: __sdk::TableUpdate<Entity>,
+    entity: __sdk::TableUpdate<Entity>,
     game_event: __sdk::TableUpdate<GameEvent>,
     health: __sdk::TableUpdate<Health>,
     inventory: __sdk::TableUpdate<Inventory>,
 }
-
 
 impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
     type Error = __sdk::Error;
@@ -208,18 +200,26 @@ impl TryFrom<__ws::v2::TransactionUpdate> for DbUpdate {
         let mut db_update = DbUpdate::default();
         for table_update in __sdk::transaction_update_iter_table_updates(raw) {
             match &table_update.table_name[..] {
-
-        "entity" => db_update.entity.append(entity_table::parse_table_update(table_update)?),
-    "game_event" => db_update.game_event.append(game_event_table::parse_table_update(table_update)?),
-    "health" => db_update.health.append(health_table::parse_table_update(table_update)?),
-    "inventory" => db_update.inventory.append(inventory_table::parse_table_update(table_update)?),
+                "entity" => db_update
+                    .entity
+                    .append(entity_table::parse_table_update(table_update)?),
+                "game_event" => db_update
+                    .game_event
+                    .append(game_event_table::parse_table_update(table_update)?),
+                "health" => db_update
+                    .health
+                    .append(health_table::parse_table_update(table_update)?),
+                "inventory" => db_update
+                    .inventory
+                    .append(inventory_table::parse_table_update(table_update)?),
 
                 unknown => {
                     return Err(__sdk::InternalError::unknown_name(
                         "table",
                         unknown,
                         "DatabaseUpdate",
-                    ).into());
+                    )
+                    .into());
                 }
             }
         }
@@ -232,65 +232,106 @@ impl __sdk::InModule for DbUpdate {
 }
 
 impl __sdk::DbUpdate for DbUpdate {
-    fn apply_to_client_cache(&self, cache: &mut __sdk::ClientCache<RemoteModule>) -> AppliedDiff<'_> {
-                    let mut diff = AppliedDiff::default();
-                
-                diff.entity = cache.apply_diff_to_table::<Entity>("entity", &self.entity).with_updates_by_pk(|row| &row.entity_id);
-        diff.game_event = cache.apply_diff_to_table::<GameEvent>("game_event", &self.game_event).with_updates_by_pk(|row| &row.event_id);
-        diff.health = cache.apply_diff_to_table::<Health>("health", &self.health).with_updates_by_pk(|row| &row.entity_id);
-        diff.inventory = cache.apply_diff_to_table::<Inventory>("inventory", &self.inventory).with_updates_by_pk(|row| &row.row_id);
+    fn apply_to_client_cache(
+        &self,
+        cache: &mut __sdk::ClientCache<RemoteModule>,
+    ) -> AppliedDiff<'_> {
+        let mut diff = AppliedDiff::default();
 
-                    diff
+        diff.entity = cache
+            .apply_diff_to_table::<Entity>("entity", &self.entity)
+            .with_updates_by_pk(|row| &row.entity_id);
+        diff.game_event = cache
+            .apply_diff_to_table::<GameEvent>("game_event", &self.game_event)
+            .with_updates_by_pk(|row| &row.event_id);
+        diff.health = cache
+            .apply_diff_to_table::<Health>("health", &self.health)
+            .with_updates_by_pk(|row| &row.entity_id);
+        diff.inventory = cache
+            .apply_diff_to_table::<Inventory>("inventory", &self.inventory)
+            .with_updates_by_pk(|row| &row.row_id);
+
+        diff
+    }
+    fn parse_initial_rows(raw: __ws::v2::QueryRows) -> __sdk::Result<Self> {
+        let mut db_update = DbUpdate::default();
+        for table_rows in raw.tables {
+            match &table_rows.table[..] {
+                "entity" => db_update
+                    .entity
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "game_event" => db_update
+                    .game_event
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "health" => db_update
+                    .health
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                "inventory" => db_update
+                    .inventory
+                    .append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
+                unknown => {
+                    return Err(
+                        __sdk::InternalError::unknown_name("table", unknown, "QueryRows").into(),
+                    );
                 }
-fn parse_initial_rows(raw: __ws::v2::QueryRows) -> __sdk::Result<Self> {
-                let mut db_update = DbUpdate::default();
-for table_rows in raw.tables {
+            }
+        }
+        Ok(db_update)
+    }
+    fn parse_unsubscribe_rows(raw: __ws::v2::QueryRows) -> __sdk::Result<Self> {
+        let mut db_update = DbUpdate::default();
+        for table_rows in raw.tables {
             match &table_rows.table[..] {
-                                "entity" => db_update.entity.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
-                "game_event" => db_update.game_event.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
-                "health" => db_update.health.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
-                "inventory" => db_update.inventory.append(__sdk::parse_row_list_as_inserts(table_rows.rows)?),
-                unknown => { return Err(__sdk::InternalError::unknown_name("table", unknown, "QueryRows").into()); }
-}}        Ok(db_update)
-}
-fn parse_unsubscribe_rows(raw: __ws::v2::QueryRows) -> __sdk::Result<Self> {
-                let mut db_update = DbUpdate::default();
-for table_rows in raw.tables {
-            match &table_rows.table[..] {
-                                "entity" => db_update.entity.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
-                "game_event" => db_update.game_event.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
-                "health" => db_update.health.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
-                "inventory" => db_update.inventory.append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
-                unknown => { return Err(__sdk::InternalError::unknown_name("table", unknown, "QueryRows").into()); }
-}}        Ok(db_update)
-}
+                "entity" => db_update
+                    .entity
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "game_event" => db_update
+                    .game_event
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "health" => db_update
+                    .health
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                "inventory" => db_update
+                    .inventory
+                    .append(__sdk::parse_row_list_as_deletes(table_rows.rows)?),
+                unknown => {
+                    return Err(
+                        __sdk::InternalError::unknown_name("table", unknown, "QueryRows").into(),
+                    );
+                }
+            }
+        }
+        Ok(db_update)
+    }
 }
 
 #[derive(Default)]
 #[allow(non_snake_case)]
 #[doc(hidden)]
 pub struct AppliedDiff<'r> {
-        entity: __sdk::TableAppliedDiff<'r, Entity>,
+    entity: __sdk::TableAppliedDiff<'r, Entity>,
     game_event: __sdk::TableAppliedDiff<'r, GameEvent>,
     health: __sdk::TableAppliedDiff<'r, Health>,
     inventory: __sdk::TableAppliedDiff<'r, Inventory>,
     __unused: std::marker::PhantomData<&'r ()>,
 }
 
-
 impl __sdk::InModule for AppliedDiff<'_> {
     type Module = RemoteModule;
 }
 
 impl<'r> __sdk::AppliedDiff<'r> for AppliedDiff<'r> {
-    fn invoke_row_callbacks(&self, event: &EventContext, callbacks: &mut __sdk::DbCallbacks<RemoteModule>) {
-                callbacks.invoke_table_row_callbacks::<Entity>("entity", &self.entity, event);
+    fn invoke_row_callbacks(
+        &self,
+        event: &EventContext,
+        callbacks: &mut __sdk::DbCallbacks<RemoteModule>,
+    ) {
+        callbacks.invoke_table_row_callbacks::<Entity>("entity", &self.entity, event);
         callbacks.invoke_table_row_callbacks::<GameEvent>("game_event", &self.game_event, event);
         callbacks.invoke_table_row_callbacks::<Health>("health", &self.health, event);
         callbacks.invoke_table_row_callbacks::<Inventory>("inventory", &self.inventory, event);
+    }
 }
-}
-
 
 #[doc(hidden)]
 #[derive(Debug)]
@@ -339,10 +380,16 @@ impl __sdk::InModule for RemoteTables {
 ///
 /// - [`DbConnection::frame_tick`].
 #[cfg_attr(not(target_arch = "wasm32"), doc = "- [`DbConnection::run_threaded`].")]
-#[cfg_attr(target_arch = "wasm32", doc = "- [`DbConnection::run_background_task`].")]
+#[cfg_attr(
+    target_arch = "wasm32",
+    doc = "- [`DbConnection::run_background_task`]."
+)]
 /// - [`DbConnection::run_async`].
 /// - [`DbConnection::advance_one_message`].
-#[cfg_attr(not(target_arch =  "wasm32"), doc = "- [`DbConnection::advance_one_message_blocking`].")]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    doc = "- [`DbConnection::advance_one_message_blocking`]."
+)]
 /// - [`DbConnection::advance_one_message_async`].
 ///
 /// Which of these methods you should call depends on the specific needs of your application,
@@ -529,7 +576,6 @@ impl __sdk::SubscriptionHandle for SubscriptionHandle {
     fn unsubscribe(self) -> __sdk::Result<()> {
         self.imp.unsubscribe_then(None)
     }
-
 }
 
 /// Alias trait for a [`__sdk::DbContext`] connected to this module,
@@ -537,17 +583,23 @@ impl __sdk::SubscriptionHandle for SubscriptionHandle {
 ///
 /// Users can use this trait as a boundary on definitions which should accept
 /// either a [`DbConnection`] or an [`EventContext`] and operate on either.
-pub trait RemoteDbContext: __sdk::DbContext<
+pub trait RemoteDbContext:
+    __sdk::DbContext<
     DbView = RemoteTables,
     Reducers = RemoteReducers,
     SubscriptionBuilder = __sdk::SubscriptionBuilder<RemoteModule>,
-> {}
-impl<Ctx: __sdk::DbContext<
-    DbView = RemoteTables,
-    Reducers = RemoteReducers,
-    SubscriptionBuilder = __sdk::SubscriptionBuilder<RemoteModule>,
->> RemoteDbContext for Ctx {}
-
+>
+{
+}
+impl<
+        Ctx: __sdk::DbContext<
+            DbView = RemoteTables,
+            Reducers = RemoteReducers,
+            SubscriptionBuilder = __sdk::SubscriptionBuilder<RemoteModule>,
+        >,
+    > RemoteDbContext for Ctx
+{
+}
 
 /// An [`__sdk::DbContext`] augmented with a [`__sdk::Event`],
 /// passed to [`__sdk::Table::on_insert`], [`__sdk::Table::on_delete`] and [`__sdk::TableWithPrimaryKey::on_update`] callbacks.
@@ -922,7 +974,6 @@ impl __sdk::DbContext for ErrorContext {
 impl __sdk::ErrorContext for ErrorContext {}
 
 impl __sdk::SpacetimeModule for RemoteModule {
-    
     type DbConnection = DbConnection;
     type EventContext = EventContext;
     type ReducerEventContext = ReducerEventContext;
@@ -938,16 +989,12 @@ impl __sdk::SpacetimeModule for RemoteModule {
     type SubscriptionHandle = SubscriptionHandle;
     type QueryBuilder = __sdk::QueryBuilder;
 
-fn register_tables(client_cache: &mut __sdk::ClientCache<Self>) {
-                entity_table::register_table(client_cache);
+    fn register_tables(client_cache: &mut __sdk::ClientCache<Self>) {
+        entity_table::register_table(client_cache);
         game_event_table::register_table(client_cache);
         health_table::register_table(client_cache);
         inventory_table::register_table(client_cache);
-}
-const ALL_TABLE_NAMES: &'static [&'static str] = &[
-                "entity",
-        "game_event",
-        "health",
-        "inventory",
-];
+    }
+    const ALL_TABLE_NAMES: &'static [&'static str] =
+        &["entity", "game_event", "health", "inventory"];
 }

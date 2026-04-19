@@ -2,27 +2,22 @@
 // WILL NOT BE SAVED. MODIFY TABLES IN YOUR MODULE SOURCE CODE INSTEAD.
 
 #![allow(unused, clippy::all)]
-use spacetimedb_sdk::__codegen::{
-	self as __sdk,
-	__lib,
-	__sats,
-	__ws,
-};
+use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 use super::entity_type::Entity;
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
 pub(super) struct SetEntitiesArgs {
-    pub entities: Vec::<Entity>,
+    pub entities: Vec<Entity>,
 }
 
 impl From<SetEntitiesArgs> for super::Reducer {
     fn from(args: SetEntitiesArgs) -> Self {
         Self::SetEntities {
             entities: args.entities,
-}
-}
+        }
+    }
 }
 
 impl __sdk::InModule for SetEntitiesArgs {
@@ -40,9 +35,8 @@ pub trait set_entities {
     /// The reducer will run asynchronously in the future,
     ///  and this method provides no way to listen for its completion status.
     /// /// Use [`set_entities:set_entities_then`] to run a callback after the reducer completes.
-    fn set_entities(&self, entities: Vec::<Entity>,
-) -> __sdk::Result<()> {
-        self.set_entities_then(entities,  |_, _| {})
+    fn set_entities(&self, entities: Vec<Entity>) -> __sdk::Result<()> {
+        self.set_entities_then(entities, |_, _| {})
     }
 
     /// Request that the remote module invoke the reducer `set_entities` to run as soon as possible,
@@ -53,7 +47,7 @@ pub trait set_entities {
     ///  and its status can be observed with the `callback`.
     fn set_entities_then(
         &self,
-        entities: Vec::<Entity>,
+        entities: Vec<Entity>,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
@@ -64,13 +58,13 @@ pub trait set_entities {
 impl set_entities for super::RemoteReducers {
     fn set_entities_then(
         &self,
-        entities: Vec::<Entity>,
+        entities: Vec<Entity>,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
             + 'static,
     ) -> __sdk::Result<()> {
-        self.imp.invoke_reducer_with_callback(SetEntitiesArgs { entities,  }, callback)
+        self.imp
+            .invoke_reducer_with_callback(SetEntitiesArgs { entities }, callback)
     }
 }
-

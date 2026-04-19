@@ -2,13 +2,7 @@
 // WILL NOT BE SAVED. MODIFY TABLES IN YOUR MODULE SOURCE CODE INSTEAD.
 
 #![allow(unused, clippy::all)]
-use spacetimedb_sdk::__codegen::{
-	self as __sdk,
-	__lib,
-	__sats,
-	__ws,
-};
-
+use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
@@ -24,8 +18,8 @@ impl From<UpdatePlayerInputArgs> for super::Reducer {
             entity_id: args.entity_id,
             dir_x: args.dir_x,
             dir_z: args.dir_z,
-}
-}
+        }
+    }
 }
 
 impl __sdk::InModule for UpdatePlayerInputArgs {
@@ -43,11 +37,13 @@ pub trait update_player_input {
     /// The reducer will run asynchronously in the future,
     ///  and this method provides no way to listen for its completion status.
     /// /// Use [`update_player_input:update_player_input_then`] to run a callback after the reducer completes.
-    fn update_player_input(&self, entity_id: __sdk::Uuid,
-dir_x: f64,
-dir_z: f64,
-) -> __sdk::Result<()> {
-        self.update_player_input_then(entity_id, dir_x, dir_z,  |_, _| {})
+    fn update_player_input(
+        &self,
+        entity_id: __sdk::Uuid,
+        dir_x: f64,
+        dir_z: f64,
+    ) -> __sdk::Result<()> {
+        self.update_player_input_then(entity_id, dir_x, dir_z, |_, _| {})
     }
 
     /// Request that the remote module invoke the reducer `update_player_input` to run as soon as possible,
@@ -59,8 +55,8 @@ dir_z: f64,
     fn update_player_input_then(
         &self,
         entity_id: __sdk::Uuid,
-dir_x: f64,
-dir_z: f64,
+        dir_x: f64,
+        dir_z: f64,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
@@ -72,14 +68,20 @@ impl update_player_input for super::RemoteReducers {
     fn update_player_input_then(
         &self,
         entity_id: __sdk::Uuid,
-dir_x: f64,
-dir_z: f64,
+        dir_x: f64,
+        dir_z: f64,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
             + 'static,
     ) -> __sdk::Result<()> {
-        self.imp.invoke_reducer_with_callback(UpdatePlayerInputArgs { entity_id, dir_x, dir_z,  }, callback)
+        self.imp.invoke_reducer_with_callback(
+            UpdatePlayerInputArgs {
+                entity_id,
+                dir_x,
+                dir_z,
+            },
+            callback,
+        )
     }
 }
-

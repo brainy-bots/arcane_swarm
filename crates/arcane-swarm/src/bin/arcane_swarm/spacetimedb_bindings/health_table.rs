@@ -2,13 +2,8 @@
 // WILL NOT BE SAVED. MODIFY TABLES IN YOUR MODULE SOURCE CODE INSTEAD.
 
 #![allow(unused, clippy::all)]
-use spacetimedb_sdk::__codegen::{
-	self as __sdk,
-	__lib,
-	__sats,
-	__ws,
-};
 use super::health_type::Health;
+use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 /// Table handle for the table `health`.
 ///
@@ -49,8 +44,12 @@ impl<'ctx> __sdk::Table for HealthTableHandle<'ctx> {
     type Row = Health;
     type EventContext = super::EventContext;
 
-    fn count(&self) -> u64 { self.imp.count() }
-    fn iter(&self) -> impl Iterator<Item = Health> + '_ { self.imp.iter() }
+    fn count(&self) -> u64 {
+        self.imp.count()
+    }
+    fn iter(&self) -> impl Iterator<Item = Health> + '_ {
+        self.imp.iter()
+    }
 
     type InsertCallbackId = HealthInsertCallbackId;
 
@@ -98,8 +97,7 @@ impl<'ctx> __sdk::TableWithPrimaryKey for HealthTableHandle<'ctx> {
 
 #[doc(hidden)]
 pub(super) fn register_table(client_cache: &mut __sdk::ClientCache<super::RemoteModule>) {
-
-        let _table = client_cache.get_or_make_table::<Health>("health");
+    let _table = client_cache.get_or_make_table::<Health>("health");
 }
 
 #[doc(hidden)]
@@ -107,26 +105,24 @@ pub(super) fn parse_table_update(
     raw_updates: __ws::v2::TableUpdate,
 ) -> __sdk::Result<__sdk::TableUpdate<Health>> {
     __sdk::TableUpdate::parse_table_update(raw_updates).map_err(|e| {
-        __sdk::InternalError::failed_parse(
-            "TableUpdate<Health>",
-            "TableUpdate",
-        ).with_cause(e).into()
+        __sdk::InternalError::failed_parse("TableUpdate<Health>", "TableUpdate")
+            .with_cause(e)
+            .into()
     })
 }
 
-        #[allow(non_camel_case_types)]
-        /// Extension trait for query builder access to the table `Health`.
-        ///
-        /// Implemented for [`__sdk::QueryTableAccessor`].
-        pub trait healthQueryTableAccess {
-            #[allow(non_snake_case)]
-            /// Get a query builder for the table `Health`.
-            fn health(&self) -> __sdk::__query_builder::Table<Health>;
-        }
+#[allow(non_camel_case_types)]
+/// Extension trait for query builder access to the table `Health`.
+///
+/// Implemented for [`__sdk::QueryTableAccessor`].
+pub trait healthQueryTableAccess {
+    #[allow(non_snake_case)]
+    /// Get a query builder for the table `Health`.
+    fn health(&self) -> __sdk::__query_builder::Table<Health>;
+}
 
-        impl healthQueryTableAccess for __sdk::QueryTableAccessor {
-            fn health(&self) -> __sdk::__query_builder::Table<Health> {
-                __sdk::__query_builder::Table::new("health")
-            }
-        }
-
+impl healthQueryTableAccess for __sdk::QueryTableAccessor {
+    fn health(&self) -> __sdk::__query_builder::Table<Health> {
+        __sdk::__query_builder::Table::new("health")
+    }
+}

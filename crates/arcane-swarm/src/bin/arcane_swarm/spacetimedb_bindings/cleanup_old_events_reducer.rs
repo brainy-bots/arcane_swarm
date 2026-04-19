@@ -2,13 +2,7 @@
 // WILL NOT BE SAVED. MODIFY TABLES IN YOUR MODULE SOURCE CODE INSTEAD.
 
 #![allow(unused, clippy::all)]
-use spacetimedb_sdk::__codegen::{
-	self as __sdk,
-	__lib,
-	__sats,
-	__ws,
-};
-
+use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
@@ -20,8 +14,8 @@ impl From<CleanupOldEventsArgs> for super::Reducer {
     fn from(args: CleanupOldEventsArgs) -> Self {
         Self::CleanupOldEvents {
             max_age_secs: args.max_age_secs,
-}
-}
+        }
+    }
 }
 
 impl __sdk::InModule for CleanupOldEventsArgs {
@@ -39,9 +33,8 @@ pub trait cleanup_old_events {
     /// The reducer will run asynchronously in the future,
     ///  and this method provides no way to listen for its completion status.
     /// /// Use [`cleanup_old_events:cleanup_old_events_then`] to run a callback after the reducer completes.
-    fn cleanup_old_events(&self, max_age_secs: u64,
-) -> __sdk::Result<()> {
-        self.cleanup_old_events_then(max_age_secs,  |_, _| {})
+    fn cleanup_old_events(&self, max_age_secs: u64) -> __sdk::Result<()> {
+        self.cleanup_old_events_then(max_age_secs, |_, _| {})
     }
 
     /// Request that the remote module invoke the reducer `cleanup_old_events` to run as soon as possible,
@@ -69,7 +62,7 @@ impl cleanup_old_events for super::RemoteReducers {
             + Send
             + 'static,
     ) -> __sdk::Result<()> {
-        self.imp.invoke_reducer_with_callback(CleanupOldEventsArgs { max_age_secs,  }, callback)
+        self.imp
+            .invoke_reducer_with_callback(CleanupOldEventsArgs { max_age_secs }, callback)
     }
 }
-

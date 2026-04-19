@@ -2,13 +2,7 @@
 // WILL NOT BE SAVED. MODIFY TABLES IN YOUR MODULE SOURCE CODE INSTEAD.
 
 #![allow(unused, clippy::all)]
-use spacetimedb_sdk::__codegen::{
-	self as __sdk,
-	__lib,
-	__sats,
-	__ws,
-};
-
+use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
@@ -20,11 +14,9 @@ pub struct GameEvent {
     pub timestamp_us: i64,
 }
 
-
 impl __sdk::InModule for GameEvent {
     type Module = super::RemoteModule;
 }
-
 
 /// Column accessor struct for the table `GameEvent`.
 ///
@@ -46,7 +38,6 @@ impl __sdk::__query_builder::HasCols for GameEvent {
             target_id: __sdk::__query_builder::Col::new(table_name, "target_id"),
             event_type: __sdk::__query_builder::Col::new(table_name, "event_type"),
             timestamp_us: __sdk::__query_builder::Col::new(table_name, "timestamp_us"),
-
         }
     }
 }
@@ -63,10 +54,8 @@ impl __sdk::__query_builder::HasIxCols for GameEvent {
     fn ix_cols(table_name: &'static str) -> Self::IxCols {
         GameEventIxCols {
             event_id: __sdk::__query_builder::IxCol::new(table_name, "event_id"),
-
         }
     }
 }
 
 impl __sdk::__query_builder::CanBeLookupTable for GameEvent {}
-

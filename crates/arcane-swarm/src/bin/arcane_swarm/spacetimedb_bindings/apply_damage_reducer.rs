@@ -2,13 +2,7 @@
 // WILL NOT BE SAVED. MODIFY TABLES IN YOUR MODULE SOURCE CODE INSTEAD.
 
 #![allow(unused, clippy::all)]
-use spacetimedb_sdk::__codegen::{
-	self as __sdk,
-	__lib,
-	__sats,
-	__ws,
-};
-
+use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
@@ -22,8 +16,8 @@ impl From<ApplyDamageArgs> for super::Reducer {
         Self::ApplyDamage {
             target_id: args.target_id,
             amount: args.amount,
-}
-}
+        }
+    }
 }
 
 impl __sdk::InModule for ApplyDamageArgs {
@@ -41,10 +35,8 @@ pub trait apply_damage {
     /// The reducer will run asynchronously in the future,
     ///  and this method provides no way to listen for its completion status.
     /// /// Use [`apply_damage:apply_damage_then`] to run a callback after the reducer completes.
-    fn apply_damage(&self, target_id: __sdk::Uuid,
-amount: u32,
-) -> __sdk::Result<()> {
-        self.apply_damage_then(target_id, amount,  |_, _| {})
+    fn apply_damage(&self, target_id: __sdk::Uuid, amount: u32) -> __sdk::Result<()> {
+        self.apply_damage_then(target_id, amount, |_, _| {})
     }
 
     /// Request that the remote module invoke the reducer `apply_damage` to run as soon as possible,
@@ -56,7 +48,7 @@ amount: u32,
     fn apply_damage_then(
         &self,
         target_id: __sdk::Uuid,
-amount: u32,
+        amount: u32,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
@@ -68,13 +60,13 @@ impl apply_damage for super::RemoteReducers {
     fn apply_damage_then(
         &self,
         target_id: __sdk::Uuid,
-amount: u32,
+        amount: u32,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
             + 'static,
     ) -> __sdk::Result<()> {
-        self.imp.invoke_reducer_with_callback(ApplyDamageArgs { target_id, amount,  }, callback)
+        self.imp
+            .invoke_reducer_with_callback(ApplyDamageArgs { target_id, amount }, callback)
     }
 }
-

@@ -2,13 +2,7 @@
 // WILL NOT BE SAVED. MODIFY TABLES IN YOUR MODULE SOURCE CODE INSTEAD.
 
 #![allow(unused, clippy::all)]
-use spacetimedb_sdk::__codegen::{
-	self as __sdk,
-	__lib,
-	__sats,
-	__ws,
-};
-
+use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
@@ -20,8 +14,8 @@ impl From<RemovePlayerByIdArgs> for super::Reducer {
     fn from(args: RemovePlayerByIdArgs) -> Self {
         Self::RemovePlayerById {
             entity_id: args.entity_id,
-}
-}
+        }
+    }
 }
 
 impl __sdk::InModule for RemovePlayerByIdArgs {
@@ -39,9 +33,8 @@ pub trait remove_player_by_id {
     /// The reducer will run asynchronously in the future,
     ///  and this method provides no way to listen for its completion status.
     /// /// Use [`remove_player_by_id:remove_player_by_id_then`] to run a callback after the reducer completes.
-    fn remove_player_by_id(&self, entity_id: __sdk::Uuid,
-) -> __sdk::Result<()> {
-        self.remove_player_by_id_then(entity_id,  |_, _| {})
+    fn remove_player_by_id(&self, entity_id: __sdk::Uuid) -> __sdk::Result<()> {
+        self.remove_player_by_id_then(entity_id, |_, _| {})
     }
 
     /// Request that the remote module invoke the reducer `remove_player_by_id` to run as soon as possible,
@@ -69,7 +62,7 @@ impl remove_player_by_id for super::RemoteReducers {
             + Send
             + 'static,
     ) -> __sdk::Result<()> {
-        self.imp.invoke_reducer_with_callback(RemovePlayerByIdArgs { entity_id,  }, callback)
+        self.imp
+            .invoke_reducer_with_callback(RemovePlayerByIdArgs { entity_id }, callback)
     }
 }
-

@@ -2,12 +2,7 @@
 // WILL NOT BE SAVED. MODIFY TABLES IN YOUR MODULE SOURCE CODE INSTEAD.
 
 #![allow(unused, clippy::all)]
-use spacetimedb_sdk::__codegen::{
-	self as __sdk,
-	__lib,
-	__sats,
-	__ws,
-};
+use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 use super::entity_type::Entity;
 
@@ -21,8 +16,8 @@ impl From<UpdatePlayerArgs> for super::Reducer {
     fn from(args: UpdatePlayerArgs) -> Self {
         Self::UpdatePlayer {
             entity: args.entity,
-}
-}
+        }
+    }
 }
 
 impl __sdk::InModule for UpdatePlayerArgs {
@@ -40,9 +35,8 @@ pub trait update_player {
     /// The reducer will run asynchronously in the future,
     ///  and this method provides no way to listen for its completion status.
     /// /// Use [`update_player:update_player_then`] to run a callback after the reducer completes.
-    fn update_player(&self, entity: Entity,
-) -> __sdk::Result<()> {
-        self.update_player_then(entity,  |_, _| {})
+    fn update_player(&self, entity: Entity) -> __sdk::Result<()> {
+        self.update_player_then(entity, |_, _| {})
     }
 
     /// Request that the remote module invoke the reducer `update_player` to run as soon as possible,
@@ -70,7 +64,7 @@ impl update_player for super::RemoteReducers {
             + Send
             + 'static,
     ) -> __sdk::Result<()> {
-        self.imp.invoke_reducer_with_callback(UpdatePlayerArgs { entity,  }, callback)
+        self.imp
+            .invoke_reducer_with_callback(UpdatePlayerArgs { entity }, callback)
     }
 }
-

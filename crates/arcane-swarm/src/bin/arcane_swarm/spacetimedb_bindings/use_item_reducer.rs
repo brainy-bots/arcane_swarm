@@ -2,13 +2,7 @@
 // WILL NOT BE SAVED. MODIFY TABLES IN YOUR MODULE SOURCE CODE INSTEAD.
 
 #![allow(unused, clippy::all)]
-use spacetimedb_sdk::__codegen::{
-	self as __sdk,
-	__lib,
-	__sats,
-	__ws,
-};
-
+use spacetimedb_sdk::__codegen::{self as __sdk, __lib, __sats, __ws};
 
 #[derive(__lib::ser::Serialize, __lib::de::Deserialize, Clone, PartialEq, Debug)]
 #[sats(crate = __lib)]
@@ -22,8 +16,8 @@ impl From<UseItemArgs> for super::Reducer {
         Self::UseItem {
             owner_id: args.owner_id,
             item_type: args.item_type,
-}
-}
+        }
+    }
 }
 
 impl __sdk::InModule for UseItemArgs {
@@ -41,10 +35,8 @@ pub trait use_item {
     /// The reducer will run asynchronously in the future,
     ///  and this method provides no way to listen for its completion status.
     /// /// Use [`use_item:use_item_then`] to run a callback after the reducer completes.
-    fn use_item(&self, owner_id: __sdk::Uuid,
-item_type: u32,
-) -> __sdk::Result<()> {
-        self.use_item_then(owner_id, item_type,  |_, _| {})
+    fn use_item(&self, owner_id: __sdk::Uuid, item_type: u32) -> __sdk::Result<()> {
+        self.use_item_then(owner_id, item_type, |_, _| {})
     }
 
     /// Request that the remote module invoke the reducer `use_item` to run as soon as possible,
@@ -56,7 +48,7 @@ item_type: u32,
     fn use_item_then(
         &self,
         owner_id: __sdk::Uuid,
-item_type: u32,
+        item_type: u32,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
@@ -68,13 +60,18 @@ impl use_item for super::RemoteReducers {
     fn use_item_then(
         &self,
         owner_id: __sdk::Uuid,
-item_type: u32,
+        item_type: u32,
 
         callback: impl FnOnce(&super::ReducerEventContext, Result<Result<(), String>, __sdk::InternalError>)
             + Send
             + 'static,
     ) -> __sdk::Result<()> {
-        self.imp.invoke_reducer_with_callback(UseItemArgs { owner_id, item_type,  }, callback)
+        self.imp.invoke_reducer_with_callback(
+            UseItemArgs {
+                owner_id,
+                item_type,
+            },
+            callback,
+        )
     }
 }
-

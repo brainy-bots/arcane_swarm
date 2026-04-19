@@ -12,11 +12,17 @@
 //! ## One WebSocket per simulated player
 //!
 //! The benchmark's premise is "N independent game clients drive N players."
-//! We honour that by opening one `DbConnection` per player and wrapping it in
-//! an `Arc` so the per-tick position loop, the action loop, and the read loop
-//! share a single socket. SpacetimeDB's module is anonymous (no per-identity
-//! auth), so sharing the connection across these loops doesn't change what the
-//! module sees: reducer calls carry their own `entity_id` argument.
+//! Each simulated player opens its own `DbConnection`. An earlier revision
+//! multiplexed every player through a single shared WebSocket — the client
+//! reported 0 errors, but SpacetimeDB's per-client `incoming_queue_length`
+//! limit (16384 messages) silently overflowed once aggregate traffic passed
+//! that rate. Every call beyond the limit was dropped server-side while the
+//! SDK's fire-and-forget API happily returned Ok. We found this via the
+//! post-run `SELECT COUNT(*) FROM game_event` not matching the action calls
+//! the swarm thought it sent. One WS per player keeps each connection's rate
+//! to its own 20 Hz + ~2 Hz action mix — well under any per-client server
+//! limit, and mirrors how real game clients actually talk to a SpacetimeDB
+//! backend.
 //!
 //! ## What still uses HTTP
 //!
@@ -79,6 +85,12 @@ pub(crate) fn connect_spacetimedb(
         .with_token(Option::<String>::None)
         .on_connect_error(|_ctx, err| {
             eprintln!("[stdb] connect error: {err}");
+        })
+        .on_disconnect(|_ctx, err| {
+            // One shared socket carries every simulated player's reducer calls.
+            // If it drops mid-run, every player's writes stop at the same tick
+            // — the metrics will show a cliff. Log so it's attributable.
+            eprintln!("[stdb] socket disconnected: {err:?}");
         })
         .build()
         .map_err(|e| format!("DbConnection::build failed: {e}"))?;
@@ -147,7 +159,9 @@ impl SharedPositions {
 }
 
 pub(crate) struct SpacetimeActionLoop {
-    pub conn: Arc<DbConnection>,
+    /// Each simulated player opens its own WebSocket; `connect_params` lets the
+    /// action loop build its dedicated connection when it spawns.
+    pub connect_params: SpacetimeConnectParams,
     pub player_id: uuid::Uuid,
     pub player_idx: u32,
     pub total_players: Arc<AtomicU32>,
@@ -161,7 +175,7 @@ pub(crate) struct SpacetimeActionLoop {
 
 pub(crate) async fn action_loop(ctx: SpacetimeActionLoop) {
     let SpacetimeActionLoop {
-        conn,
+        connect_params,
         player_id,
         player_idx,
         total_players,
@@ -176,6 +190,13 @@ pub(crate) async fn action_loop(ctx: SpacetimeActionLoop) {
     if actions_per_sec <= 0.0 {
         return;
     }
+    let conn = match connect_spacetimedb(&connect_params) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[stdb action] connect failed for player {player_idx}: {e}");
+            return;
+        }
+    };
     let interval_us = (1_000_000.0 / actions_per_sec) as u64;
     let mut interval = time::interval(Duration::from_micros(interval_us));
     interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -304,7 +325,9 @@ pub(crate) async fn read_loop_spacetimedb(ctx: SpacetimeReadLoop) {
 }
 
 pub(crate) struct SpacetimePlayerLoop {
-    pub conn: Arc<DbConnection>,
+    /// One dedicated WebSocket per simulated player. Opened inside
+    /// `player_loop_spacetimedb` so every task drives its own connection.
+    pub connect_params: SpacetimeConnectParams,
     pub idx: u32,
     pub entity_id: uuid::Uuid,
     pub total: u32,
@@ -320,7 +343,7 @@ pub(crate) struct SpacetimePlayerLoop {
 
 pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
     let SpacetimePlayerLoop {
-        conn,
+        connect_params,
         idx,
         entity_id,
         total,
@@ -333,6 +356,17 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
         burst,
         run_started,
     } = ctx;
+
+    let conn = match connect_spacetimedb(&connect_params) {
+        Ok(c) => c,
+        Err(e) => {
+            if idx == 0 {
+                eprintln!("[stdb player 0] connect failed: {e}");
+            }
+            metrics.record_err_kind(ErrorKind::NotDelivered);
+            return;
+        }
+    };
 
     let clustered = cluster_flag.load(Ordering::Relaxed);
     let mut player = Player::new(entity_id, idx, total, clustered);

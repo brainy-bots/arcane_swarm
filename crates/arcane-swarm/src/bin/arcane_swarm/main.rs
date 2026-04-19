@@ -52,19 +52,20 @@ pub(crate) trait BackendRuntime: Send + Sync {
         read_rate: f64,
     ) -> Option<tokio::task::JoinHandle<()>>;
 
-    /// SpacetimeDB-only: hand out the shared SDK connection so the action-loop
-    /// spawner can fire reducers over the same WebSocket. Default `None` for
+    /// SpacetimeDB-only: hand out the connection params so the action-loop
+    /// spawner can open its own WebSocket per player. Default `None` for
     /// backends that handle actions inside their own player_loop (e.g. Arcane).
-    fn spacetimedb_conn(&self) -> Option<Arc<spacetimedb_bindings::DbConnection>> {
+    fn spacetimedb_connect_params(&self) -> Option<backends_spacetimedb::SpacetimeConnectParams> {
         None
     }
 }
 
 struct SpacetimeRuntime {
-    /// Shared SDK connection for every simulated player on this swarm. One WebSocket
-    /// per driver process (anonymous), and `entity_id` is carried in every reducer
-    /// arg — the server doesn't need per-player identities for this benchmark.
-    conn: Arc<spacetimedb_bindings::DbConnection>,
+    /// Connection params handed to every player loop so it opens its own
+    /// dedicated WebSocket. Multiplexing all players over one socket hit
+    /// SpacetimeDB's per-client `incoming_queue_length` limit under load and
+    /// silently dropped messages — see backends_spacetimedb.rs top-of-file.
+    connect_params: backends_spacetimedb::SpacetimeConnectParams,
     sql_url: String,
     server_physics: bool,
 }
@@ -81,7 +82,7 @@ impl BackendRuntime for SpacetimeRuntime {
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(backends_spacetimedb::player_loop_spacetimedb(
             backends_spacetimedb::SpacetimePlayerLoop {
-                conn: Arc::clone(&self.conn),
+                connect_params: self.connect_params.clone(),
                 idx: params.idx,
                 entity_id: params.entity_id,
                 total: params.desired_total,
@@ -119,8 +120,8 @@ impl BackendRuntime for SpacetimeRuntime {
         )))
     }
 
-    fn spacetimedb_conn(&self) -> Option<Arc<spacetimedb_bindings::DbConnection>> {
-        Some(Arc::clone(&self.conn))
+    fn spacetimedb_connect_params(&self) -> Option<backends_spacetimedb::SpacetimeConnectParams> {
+        Some(self.connect_params.clone())
     }
 }
 
@@ -184,20 +185,14 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     let read_metrics = Arc::new(Metrics::new());
 
     let backend_runtime: Arc<dyn BackendRuntime> = match cfg.backend {
-        Backend::SpacetimeDb => {
-            let conn = backends_spacetimedb::connect_spacetimedb(
-                &backends_spacetimedb::SpacetimeConnectParams {
-                    ws_uri: ws_uri.clone(),
-                    database_name: cfg.database.clone(),
-                },
-            )
-            .expect("SpacetimeDB connect");
-            Arc::new(SpacetimeRuntime {
-                conn,
-                sql_url: sql_url.clone(),
-                server_physics: cfg.server_physics,
-            })
-        }
+        Backend::SpacetimeDb => Arc::new(SpacetimeRuntime {
+            connect_params: backends_spacetimedb::SpacetimeConnectParams {
+                ws_uri: ws_uri.clone(),
+                database_name: cfg.database.clone(),
+            },
+            sql_url: sql_url.clone(),
+            server_physics: cfg.server_physics,
+        }),
         Backend::Arcane => {
             let endpoint = match &cfg.arcane_manager {
                 Some(base) => ArcaneEndpoint::ManagerJoin {
@@ -479,20 +474,14 @@ async fn main() {
     let read_metrics = Arc::new(Metrics::new());
 
     let backend_runtime: Arc<dyn BackendRuntime> = match cfg.backend {
-        Backend::SpacetimeDb => {
-            let conn = backends_spacetimedb::connect_spacetimedb(
-                &backends_spacetimedb::SpacetimeConnectParams {
-                    ws_uri: ws_uri.clone(),
-                    database_name: cfg.database.clone(),
-                },
-            )
-            .expect("SpacetimeDB connect");
-            Arc::new(SpacetimeRuntime {
-                conn,
-                sql_url: sql_url.clone(),
-                server_physics: cfg.server_physics,
-            })
-        }
+        Backend::SpacetimeDb => Arc::new(SpacetimeRuntime {
+            connect_params: backends_spacetimedb::SpacetimeConnectParams {
+                ws_uri: ws_uri.clone(),
+                database_name: cfg.database.clone(),
+            },
+            sql_url: sql_url.clone(),
+            server_physics: cfg.server_physics,
+        }),
         Backend::Arcane => {
             let endpoint = match &cfg.arcane_manager {
                 Some(base) => ArcaneEndpoint::ManagerJoin {
@@ -591,12 +580,12 @@ async fn main() {
     // In Arcane mode, actions go through the WebSocket (handled inside player_loop_arcane).
     // In SpacetimeDB mode, actions fire reducers on the shared SDK connection.
     if cfg.actions_per_sec > 0.0 && backend_name == "spacetimedb" {
-        if let Some(action_conn) = backend_runtime.spacetimedb_conn() {
+        if let Some(action_connect) = backend_runtime.spacetimedb_connect_params() {
             for i in 0..cfg.players {
                 let player_id = all_ids[i as usize];
                 handles.push(tokio::spawn(backends_spacetimedb::action_loop(
                     backends_spacetimedb::SpacetimeActionLoop {
-                        conn: Arc::clone(&action_conn),
+                        connect_params: action_connect.clone(),
                         player_id,
                         player_idx: i,
                         total_players: total_players_atomic.clone(),

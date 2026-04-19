@@ -69,12 +69,12 @@ pub(crate) fn spawn_control_mode_player(
         .spawn_read(kit.loop_shared, &params, kit.read_rate);
 
     if kit.actions_per_sec > 0.0 {
-        if let Some(action_conn) = kit.backend_runtime.spacetimedb_conn() {
+        if let Some(action_connect) = kit.backend_runtime.spacetimedb_connect_params() {
             let action_idx = kit.max_players as usize + idx;
             let player_id = kit.all_ids[idx];
             kit.handles[action_idx] = Some(tokio::spawn(backends_spacetimedb::action_loop(
                 backends_spacetimedb::SpacetimeActionLoop {
-                    conn: action_conn,
+                    connect_params: action_connect,
                     player_id,
                     player_idx: idx as u32,
                     total_players: kit.total_players_atomic.clone(),
