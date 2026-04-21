@@ -115,6 +115,19 @@ impl Metrics {
         self.latency_max_us.fetch_max(us, Ordering::Relaxed);
     }
 
+    /// Record a successful operation without contributing a latency sample.
+    ///
+    /// Use this for fire-and-forget sends (reducer calls, fire-and-forget
+    /// WebSocket writes) whose call-site elapsed time is meaningless —
+    /// `socket.send()` into a local buffer returns in nanoseconds regardless
+    /// of whether the server is healthy, lagging, or dead. Latency on those
+    /// transports is measured separately by observing when the server's
+    /// outbound stream reflects the write back (see `backends_arcane` and
+    /// `backends_spacetimedb` in the binary crate).
+    pub fn record_ok_count(&self) {
+        self.ok.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_ok_bytes(&self, latency: Duration, bytes: u64) {
         self.record_ok(latency);
         self.bytes.fetch_add(bytes, Ordering::Relaxed);

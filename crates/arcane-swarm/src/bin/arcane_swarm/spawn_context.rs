@@ -8,8 +8,6 @@ use std::time::Duration;
 
 use arcane_swarm::{BurstConfig, Metrics};
 
-use super::backends_spacetimedb;
-
 /// HTTP client, metric sinks, and flags shared by every player loop on a run.
 ///
 /// Action-loop config (rate, metrics, target pool) lives here too because both
@@ -21,7 +19,6 @@ pub(crate) struct PlayerLoopShared {
     pub read_metrics: Arc<Metrics>,
     pub action_metrics: Arc<Metrics>,
     pub cluster_flag: Arc<AtomicBool>,
-    pub positions: Arc<backends_spacetimedb::SharedPositions>,
     pub all_ids: Arc<Vec<uuid::Uuid>>,
     pub total_players: Arc<AtomicU32>,
     pub actions_per_sec: f64,
