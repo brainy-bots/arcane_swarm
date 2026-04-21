@@ -23,8 +23,8 @@ use std::time::Duration;
 use tokio::time;
 
 use arcane_swarm::{
-    parse_args, run_reporter, ArcaneEndpoint, Backend, Config, Metrics, ReporterConfig, SwarmMode,
-    VISIBILITY_RADIUS,
+    parse_args, run_reporter, sample_proc, ArcaneEndpoint, Backend, Config, Metrics,
+    ReporterConfig, SwarmMode, VISIBILITY_RADIUS,
 };
 
 mod backends_arcane;
@@ -217,6 +217,48 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     let desired_players = Arc::new(AtomicU32::new(cfg.players.min(cfg.max_players)));
     let total_players_atomic = desired_players.clone();
     let stop_all = Arc::new(AtomicBool::new(false));
+
+    // Driver CPU/RSS sampler. Runs for the full lifetime of control mode so it
+    // covers the ramp window (can exceed the measurement window by minutes at
+    // high player counts). Without this, ramp-timeout tiers produce no driver
+    // telemetry — the reporter that `run_reporter` owns is not spawned in
+    // control mode, since control mode reports are driven by REPORT commands.
+    // Emitted line shape is kept identical to the reporter's driver fields so
+    // any post-mortem tooling can parse both uniformly.
+    {
+        let stop_all = stop_all.clone();
+        let total_players_atomic = total_players_atomic.clone();
+        tokio::spawn(async move {
+            let mut interval = time::interval(Duration::from_secs(1));
+            interval.tick().await;
+            let mut prev_cpu_ticks: Option<u64> = None;
+            loop {
+                interval.tick().await;
+                if stop_all.load(Ordering::Relaxed) {
+                    break;
+                }
+                let (drv_cpu_pct, drv_rss_mb) = match sample_proc() {
+                    Some((cpu_ticks, rss_kb)) => {
+                        let cpu_pct = match prev_cpu_ticks {
+                            Some(prev) => cpu_ticks.saturating_sub(prev) as f64,
+                            None => 0.0,
+                        };
+                        prev_cpu_ticks = Some(cpu_ticks);
+                        (Some(cpu_pct), Some(rss_kb as f64 / 1024.0))
+                    }
+                    None => (None, None),
+                };
+                if let (Some(cpu), Some(rss)) = (drv_cpu_pct, drv_rss_mb) {
+                    let elapsed = run_started.elapsed().as_secs();
+                    let players = total_players_atomic.load(Ordering::Relaxed);
+                    eprintln!(
+                        "[{:>4}s] [driver] players={} drv_cpu={:.1}% drv_rss={:.0}MB",
+                        elapsed, players, cpu, rss,
+                    );
+                }
+            }
+        });
+    }
 
     let max_players = cfg.max_players;
     // One task slot per simulated player — the player loop carries both
