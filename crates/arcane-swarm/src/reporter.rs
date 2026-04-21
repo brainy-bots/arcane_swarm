@@ -19,7 +19,7 @@ use crate::metrics::{ErrorBreakdown, Metrics, MetricsSnapshot};
 ///
 /// `rss_kb` is `VmRSS` from `/proc/self/status` (resident memory in kB).
 #[cfg(target_os = "linux")]
-fn sample_proc() -> Option<(u64, u64)> {
+pub fn sample_proc() -> Option<(u64, u64)> {
     let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
     // `comm` (field 2) may contain spaces and parens — split after the final ')'.
     let after = stat.rfind(')').map(|i| &stat[i + 1..])?;
@@ -40,7 +40,7 @@ fn sample_proc() -> Option<(u64, u64)> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn sample_proc() -> Option<(u64, u64)> {
+pub fn sample_proc() -> Option<(u64, u64)> {
     None
 }
 
