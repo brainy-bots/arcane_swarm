@@ -1,11 +1,32 @@
 //! Arcane backend loops (manager join + cluster WebSocket write/read).
 //!
 //! Implements binary-internal runtime behavior for `--backend arcane`.
+//!
+//! ## What the "lat" column means here
+//!
+//! The client's outbound writes are fire-and-forget WebSocket frames —
+//! `sink.send(Message::Binary(_))` returns in nanoseconds once the bytes are
+//! queued in the local send buffer, regardless of whether the cluster is
+//! healthy, lagging, or dead. Timing the call site is therefore meaningless.
+//!
+//! Instead the swarm measures **client-perceived latency**: the wall-clock
+//! gap between "I wrote state at T0" and "the cluster's next broadcast frame
+//! carrying my own entity landed in my receive buffer at T1". That's what a
+//! real game client experiences — action → world-reflection. Under server
+//! load the cluster's tick slides later, the broadcast arrives late, and the
+//! number rises. Under catastrophic load the broadcast stops, and the
+//! `NotDelivered` / `ConnectionDrop` counters pick up.
+//!
+//! The swarm decodes each incoming binary frame via
+//! [`arcane_wire::decode_server`] and walks `DeltaPayload::updated`; when it
+//! finds its own `entity_id` it computes `now - last_send` and records the
+//! sample. Every outbound write (movement or action) updates `last_send`.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use arcane_wire::{decode_server, ServerFrame};
 use futures_util::{SinkExt, StreamExt};
 use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
@@ -155,16 +176,43 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
     };
     let (mut sink, mut stream) = ws_stream.split();
 
+    // Shared micros-since-run-start of the player's most recent outbound write
+    // (movement or action). The drain task reads this when it spots the
+    // player's own entity_id in an incoming broadcast frame and computes
+    // latency = now - last_send. Using a shared atomic rather than passing
+    // through a channel keeps the hot paths lock-free.
+    let last_send_micros = Arc::new(AtomicI64::new(-1));
+
     let stop_drain = stop.clone();
     let rm = read_metrics.clone();
+    let latency_metrics = metrics.clone();
+    let last_send_drain = last_send_micros.clone();
+    let my_id = player.id;
+    let drain_run_started = run_started;
     tokio::spawn(async move {
         while !stop_drain.load(Ordering::Relaxed) {
             match stream.next().await {
-                Some(Ok(Message::Text(txt))) => {
-                    rm.record_inbound_ok(txt.len() as u64);
-                }
                 Some(Ok(Message::Binary(bin))) => {
                     rm.record_inbound_ok(bin.len() as u64);
+                    // Decode the cluster's broadcast delta and look for our
+                    // own entity_id. The first hit produces a real latency
+                    // sample; extra hits in the same frame (shouldn't happen,
+                    // but defensive) are ignored to avoid double-counting.
+                    if let Ok(ServerFrame::Delta(payload)) = decode_server(&bin) {
+                        if payload.updated.iter().any(|e| e.entity_id == my_id) {
+                            let sent = last_send_drain.load(Ordering::Relaxed);
+                            if sent >= 0 {
+                                let now = drain_run_started.elapsed().as_micros() as i64;
+                                let lat_us = (now - sent).max(0) as u64;
+                                latency_metrics.record_ok(Duration::from_micros(lat_us));
+                            }
+                        }
+                    }
+                }
+                Some(Ok(Message::Text(txt))) => {
+                    // Cluster no longer speaks text frames after Shape B, but
+                    // we still accept any bytes we receive as inbound traffic.
+                    rm.record_inbound_ok(txt.len() as u64);
                 }
                 Some(Ok(_)) => {}
                 _ => {
@@ -199,10 +247,12 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
         let msg = encode_player_state(
             &player.id, player.x, player.y, player.z, player.vx, player.vy, player.vz,
         );
-        let t0 = std::time::Instant::now();
         match sink.send(Message::Binary(msg)).await {
             Ok(_) => {
-                metrics.record_ok(t0.elapsed());
+                // Count the successful enqueue; latency is recorded by the
+                // drain task when it sees the cluster echo this write back.
+                metrics.record_ok_count();
+                last_send_micros.store(run_started.elapsed().as_micros() as i64, Ordering::Relaxed);
             }
             Err(e) => {
                 metrics.record_err_kind(ErrorKind::NotDelivered);
@@ -221,10 +271,14 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
                 action_tick += 1;
                 let (action_type, payload) = random_arcane_action(idx, action_tick);
                 let action_msg = encode_game_action(&player.id, action_type, payload.as_bytes());
-                let t0 = std::time::Instant::now();
                 match sink.send(Message::Binary(action_msg)).await {
                     Ok(_) => {
-                        action_metrics.record_ok(t0.elapsed());
+                        // Same pattern as movement: count the enqueue; the
+                        // next echo carrying our entity provides the latency
+                        // sample for the combined write stream.
+                        action_metrics.record_ok_count();
+                        last_send_micros
+                            .store(run_started.elapsed().as_micros() as i64, Ordering::Relaxed);
                     }
                     Err(e) => {
                         action_metrics.record_err();

@@ -64,7 +64,6 @@ struct SpacetimeRuntime {
     /// SpacetimeDB's per-client `incoming_queue_length` limit under load and
     /// silently dropped messages — see backends_spacetimedb.rs top-of-file.
     connect_params: backends_spacetimedb::SpacetimeConnectParams,
-    sql_url: String,
     server_physics: bool,
 }
 
@@ -86,11 +85,11 @@ impl BackendRuntime for SpacetimeRuntime {
                 total: params.desired_total,
                 tick_interval: params.tick_interval,
                 metrics: shared.metrics.clone(),
+                read_metrics: shared.read_metrics.clone(),
                 action_metrics: shared.action_metrics.clone(),
                 stop: params.stop,
                 cluster_flag: shared.cluster_flag.clone(),
                 server_physics: self.server_physics,
-                positions: shared.positions.clone(),
                 all_ids: shared.all_ids.clone(),
                 total_players: shared.total_players.clone(),
                 actions_per_sec: shared.actions_per_sec,
@@ -102,24 +101,14 @@ impl BackendRuntime for SpacetimeRuntime {
 
     fn spawn_read(
         &self,
-        shared: &PlayerLoopShared,
-        params: &PlayerSpawnParams,
-        read_rate: f64,
+        _shared: &PlayerLoopShared,
+        _params: &PlayerSpawnParams,
+        _read_rate: f64,
     ) -> Option<tokio::task::JoinHandle<()>> {
-        if read_rate <= 0.0 {
-            return None;
-        }
-        Some(tokio::spawn(backends_spacetimedb::read_loop_spacetimedb(
-            backends_spacetimedb::SpacetimeReadLoop {
-                client: shared.http_client.clone(),
-                sql_url: self.sql_url.clone(),
-                read_rate,
-                read_metrics: shared.read_metrics.clone(),
-                stop: params.stop.clone(),
-                player_idx: params.idx,
-                positions: shared.positions.clone(),
-            },
-        )))
+        // SpacetimeDB reads arrive as subscription updates via the SDK — the
+        // player loop registers an `on_update(Entity)` handler inline and
+        // counts inbound bytes there. No separate read task to spawn.
+        None
     }
 }
 
@@ -170,7 +159,6 @@ impl BackendRuntime for ArcaneRuntime {
 async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     let run_started = std::time::Instant::now();
     let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
-    let sql_url = format!("{}/v1/database/{}/sql", stdb_base, cfg.database);
     // SDK requires a ws:// or wss:// URI rather than http://.
     let ws_uri = stdb_base
         .replacen("https://", "wss://", 1)
@@ -186,7 +174,6 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                 ws_uri: ws_uri.clone(),
                 database_name: cfg.database.clone(),
             },
-            sql_url: sql_url.clone(),
             server_physics: cfg.server_physics,
         }),
         Backend::Arcane => {
@@ -276,7 +263,6 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         .build()
         .expect("HTTP client");
 
-    let positions = Arc::new(backends_spacetimedb::SharedPositions::new(max_players));
     let cluster_flag = cfg.cluster_command.clone();
 
     // Precreate per-player stop flags so control tasks can stop everyone without synchronization.
@@ -303,7 +289,6 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         read_metrics: read_metrics.clone(),
         action_metrics: action_metrics.clone(),
         cluster_flag: cluster_flag.clone(),
-        positions: positions.clone(),
         all_ids: all_ids.clone(),
         total_players: total_players_atomic.clone(),
         actions_per_sec: cfg.actions_per_sec,
@@ -495,7 +480,6 @@ async fn main() {
     let run_started = std::time::Instant::now();
     let tick_interval = Duration::from_micros(1_000_000 / cfg.tick_rate as u64);
     let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
-    let sql_url = format!("{}/v1/database/{}/sql", stdb_base, cfg.database);
     let ws_uri = stdb_base
         .replacen("https://", "wss://", 1)
         .replacen("http://", "ws://", 1);
@@ -510,7 +494,6 @@ async fn main() {
                 ws_uri: ws_uri.clone(),
                 database_name: cfg.database.clone(),
             },
-            sql_url: sql_url.clone(),
             server_physics: cfg.server_physics,
         }),
         Backend::Arcane => {
@@ -560,8 +543,6 @@ async fn main() {
         .build()
         .expect("HTTP client");
 
-    let positions = Arc::new(backends_spacetimedb::SharedPositions::new(cfg.players));
-
     if backend_name == "spacetimedb" {
         eprintln!(
             "  SpacetimeDB: {}/database/{}",
@@ -573,12 +554,10 @@ async fn main() {
         eprintln!("  Arcane WS: {} (single cluster)", cfg.arcane_ws);
     }
 
-    if cfg.read_rate > 0.0 && backend_name == "spacetimedb" {
+    if backend_name == "spacetimedb" {
         eprintln!(
-            "  Read simulation: spatial queries (radius={}) at {} Hz per player ({} total queries/s)",
+            "  Read simulation: SpacetimeDB SDK subscription on `entity` in a {}-unit AOI box around each player's starting position (delivers updates via on_update, no HTTP polling).",
             VISIBILITY_RADIUS,
-            cfg.read_rate,
-            cfg.read_rate as u64 * cfg.players as u64
         );
     }
 
@@ -588,7 +567,6 @@ async fn main() {
         read_metrics: read_metrics.clone(),
         action_metrics: action_metrics.clone(),
         cluster_flag: cfg.cluster_command.clone(),
-        positions: positions.clone(),
         all_ids: all_ids.clone(),
         total_players: total_players_atomic.clone(),
         actions_per_sec: cfg.actions_per_sec,

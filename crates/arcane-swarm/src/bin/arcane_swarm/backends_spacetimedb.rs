@@ -32,12 +32,32 @@
 //! uses one WS per player, so the extra sockets were pure benchmark-fairness
 //! noise. This revision collapses them back to one.
 //!
-//! ## What still uses HTTP
+//! ## What the "lat" column means here
 //!
-//! Spatial reads (`SELECT * FROM entity WHERE x BETWEEN … AND z BETWEEN …`)
-//! stay on the HTTP SQL endpoint. After the module-side `btree(x, z)` index
-//! landed, these are cheap — SQL subscriptions would be equivalent here for a
-//! worse-DX tradeoff, so the HTTP path survives.
+//! The SDK's `conn.reducers.update_player_input(...)` is fire-and-forget —
+//! the call returns in microseconds once the message is queued in the SDK's
+//! send buffer, regardless of whether SpacetimeDB has processed it. Timing
+//! the call site would always read ~0 ms and tell us nothing about server
+//! load. Instead the swarm measures **client-perceived latency**:
+//!
+//! 1. Every outbound write updates a shared `last_send_micros` for this
+//!    player.
+//! 2. The same connection is subscribed to the `entity` table (restricted to
+//!    a spatial region around the player's starting position, matching what
+//!    a real game client's area-of-interest subscription would look like).
+//! 3. When the SDK fires `on_update(Entity)` for the player's own entity_id,
+//!    we compute `now - last_send` and record that as a latency sample.
+//!
+//! That number represents "time from my action to seeing my world reflect
+//! it" — the same quantity a real game client experiences. Under server
+//! load, tick processing slides later, the subscription push lags, and the
+//! number rises. Under catastrophic load the subscription stalls and the
+//! `NotDelivered` / `Transport` error counters pick up.
+//!
+//! The previous HTTP SQL polling path (`reqwest::Client.post(sql_url)`
+//! against `/v1/database/<db>/sql`) has been removed — it was the CLI-shape
+//! read, not the pipe a game client uses. Subscriptions fill the same role
+//! and are what SpacetimeDB's docs recommend for real clients.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -51,13 +71,13 @@ use arcane_swarm::{
 };
 
 use crate::spacetimedb_bindings::{
-    pickup_item_reducer::pickup_item, player_interact_reducer::player_interact,
-    remove_player_by_id_reducer::remove_player_by_id,
+    entity_table::EntityTableAccess, pickup_item_reducer::pickup_item,
+    player_interact_reducer::player_interact, remove_player_by_id_reducer::remove_player_by_id,
     update_player_input_reducer::update_player_input, update_player_reducer::update_player,
     use_item_reducer::use_item, DbConnection, Entity,
 };
 
-use spacetimedb_sdk::{DbContext, Uuid as StdbUuid};
+use spacetimedb_sdk::{DbContext, TableWithPrimaryKey, Uuid as StdbUuid};
 
 /// Convert a runtime `uuid::Uuid` into the SpacetimeDB-native `Uuid`. These
 /// are two different types (SpacetimeDB's is `{ __uuid__: u128 }`) even though
@@ -137,105 +157,6 @@ fn random_action(player_idx: u32, total_players: u32, tick: u64) -> GameAction {
     }
 }
 
-pub(crate) struct SharedPositions {
-    xs: Vec<AtomicI64>,
-    zs: Vec<AtomicI64>,
-}
-
-impl SharedPositions {
-    pub(crate) fn new(count: u32) -> Self {
-        let n = count as usize;
-        Self {
-            xs: (0..n).map(|_| AtomicI64::new(0)).collect(),
-            zs: (0..n).map(|_| AtomicI64::new(0)).collect(),
-        }
-    }
-
-    pub(crate) fn set(&self, idx: u32, x: f64, z: f64) {
-        let i = idx as usize;
-        self.xs[i].store(x as i64, Ordering::Relaxed);
-        self.zs[i].store(z as i64, Ordering::Relaxed);
-    }
-
-    pub(crate) fn get(&self, idx: u32) -> (f64, f64) {
-        let i = idx as usize;
-        (
-            self.xs[i].load(Ordering::Relaxed) as f64,
-            self.zs[i].load(Ordering::Relaxed) as f64,
-        )
-    }
-}
-
-pub(crate) struct SpacetimeReadLoop {
-    pub client: reqwest::Client,
-    pub sql_url: String,
-    pub read_rate: f64,
-    pub read_metrics: Arc<Metrics>,
-    pub stop: Arc<AtomicBool>,
-    pub player_idx: u32,
-    pub positions: Arc<SharedPositions>,
-}
-
-pub(crate) async fn read_loop_spacetimedb(ctx: SpacetimeReadLoop) {
-    let SpacetimeReadLoop {
-        client,
-        sql_url,
-        read_rate,
-        read_metrics,
-        stop,
-        player_idx,
-        positions,
-    } = ctx;
-
-    if read_rate <= 0.0 {
-        return;
-    }
-    let interval_us = (1_000_000.0 / read_rate) as u64;
-    let mut interval = time::interval(Duration::from_micros(interval_us));
-    interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-
-    while !stop.load(Ordering::Relaxed) {
-        interval.tick().await;
-        let (px, pz) = positions.get(player_idx);
-        let query = format!(
-            "SELECT * FROM entity WHERE x >= {} AND x <= {} AND z >= {} AND z <= {}",
-            (px - VISIBILITY_RADIUS) as i64,
-            (px + VISIBILITY_RADIUS) as i64,
-            (pz - VISIBILITY_RADIUS) as i64,
-            (pz + VISIBILITY_RADIUS) as i64,
-        );
-        let t0 = Instant::now();
-        match client
-            .post(&sql_url)
-            .header("Content-Type", "text/plain")
-            .body(query)
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                let bytes = resp.bytes().await.map(|b| b.len() as u64).unwrap_or(0);
-                read_metrics.record_ok_bytes(t0.elapsed(), bytes);
-            }
-            Ok(resp) => {
-                read_metrics.record_err_kind(ErrorKind::HttpStatus);
-                if player_idx == 0 {
-                    let s = resp.status();
-                    let t = resp.text().await.unwrap_or_default();
-                    eprintln!("[player 0 read] HTTP {}: {}", s, &t[..t.len().min(200)]);
-                }
-            }
-            Err(e) => {
-                let kind = if e.is_timeout() {
-                    ErrorKind::Timeout
-                } else {
-                    ErrorKind::Transport
-                };
-                read_metrics.record_err_kind(kind);
-            }
-        }
-    }
-}
-
 pub(crate) struct SpacetimePlayerLoop {
     /// One dedicated WebSocket per simulated player — shared between movement
     /// and action reducer calls. Opened inside `player_loop_spacetimedb` so
@@ -246,11 +167,11 @@ pub(crate) struct SpacetimePlayerLoop {
     pub total: u32,
     pub tick_interval: Duration,
     pub metrics: Arc<Metrics>,
+    pub read_metrics: Arc<Metrics>,
     pub action_metrics: Arc<Metrics>,
     pub stop: Arc<AtomicBool>,
     pub cluster_flag: Arc<AtomicBool>,
     pub server_physics: bool,
-    pub positions: Arc<SharedPositions>,
     pub all_ids: Arc<Vec<uuid::Uuid>>,
     pub total_players: Arc<AtomicU32>,
     pub actions_per_sec: f64,
@@ -266,11 +187,11 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
         total,
         tick_interval,
         metrics,
+        read_metrics,
         action_metrics,
         stop,
         cluster_flag,
         server_physics: _server_physics,
-        positions,
         all_ids,
         total_players,
         actions_per_sec,
@@ -291,12 +212,72 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
 
     let clustered = cluster_flag.load(Ordering::Relaxed);
     let mut player = Player::new(entity_id, idx, total, clustered);
-    positions.set(idx, player.x, player.z);
     let tick_dt = tick_interval.as_secs_f64();
     let mut interval = time::interval(tick_interval);
     interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
 
     let player_stdb = to_stdb_uuid(&player.id);
+
+    // Shared micros-since-run-start of this player's most recent outbound
+    // reducer call. The `on_update` callback reads this to compute
+    // client-perceived latency when SpacetimeDB delivers the subscribed
+    // `entity` row back. See the module-level docstring for the full
+    // rationale — it's the same mechanism used by `backends_arcane.rs`.
+    let last_send_micros = Arc::new(AtomicI64::new(-1));
+
+    // Register the latency hook before we subscribe, so any update that
+    // arrives during the initial applied() is counted. The SDK invokes the
+    // callback on its internal task, so the captures must be Send + 'static.
+    {
+        let last_send_hook = last_send_micros.clone();
+        let metrics_hook = metrics.clone();
+        let read_metrics_hook = read_metrics.clone();
+        let run_started_hook = run_started;
+        conn.db.entity().on_update(move |_ectx, _old, new| {
+            // Count every inbound row update as "read workload" — this is the
+            // equivalent of the byte-counting in the Arcane WS drain task.
+            read_metrics_hook.record_inbound_ok(std::mem::size_of::<Entity>() as u64);
+            if new.entity_id == player_stdb {
+                let sent = last_send_hook.load(Ordering::Relaxed);
+                if sent >= 0 {
+                    let now = run_started_hook.elapsed().as_micros() as i64;
+                    let lat_us = (now - sent).max(0) as u64;
+                    metrics_hook.record_ok(Duration::from_micros(lat_us));
+                }
+            }
+        });
+    }
+
+    // Subscribe to the player's spatial area-of-interest. Static box around
+    // the starting position — matches what a real game client's subscription
+    // would look like (entities near me) and keeps per-connection fan-out
+    // bounded. Players don't wander far during a 30 s tier at the benchmark's
+    // movement velocities, so the starting-position box is a faithful proxy.
+    //
+    // We also subscribe to the player's own row unconditionally so the
+    // latency signal stays intact even if a player drifts out of the AOI box
+    // (which shouldn't happen over 30 s but the defensive subscription is
+    // essentially free).
+    let (px0, pz0) = (player.x as i64, player.z as i64);
+    let r = VISIBILITY_RADIUS as i64;
+    let aoi_query = format!(
+        "SELECT * FROM entity WHERE x >= {} AND x <= {} AND z >= {} AND z <= {}",
+        px0 - r,
+        px0 + r,
+        pz0 - r,
+        pz0 + r,
+    );
+    let self_query = format!(
+        "SELECT * FROM entity WHERE entity_id = 0x{:032x}",
+        player_stdb.as_u128()
+    );
+    let _sub = conn
+        .subscription_builder()
+        .on_error(|_err_ctx, err| {
+            eprintln!("[stdb] subscription error: {err}");
+        })
+        .subscribe([aoi_query.as_str(), self_query.as_str()]);
+
     let mut first_tick = true;
 
     // Action timing: emit game actions at configured rate via the same
@@ -316,10 +297,9 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
             player.steer_to_point(2500.0, 2500.0);
         }
         player.tick(tick_dt, cluster_flag.load(Ordering::Relaxed));
-        positions.set(idx, player.x, player.z);
 
-        // Movement reducer call
-        let t0 = Instant::now();
+        // Movement reducer call (fire-and-forget — latency is measured by the
+        // on_update handler above).
         let result = if first_tick {
             // Insert the Entity row so subsequent input updates have something to move.
             let entity = Entity {
@@ -340,7 +320,11 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
                 .map_err(|e| e.to_string())
         };
         match result {
-            Ok(()) => metrics.record_ok(t0.elapsed()),
+            Ok(()) => {
+                // Count the successful enqueue; latency lands via on_update.
+                metrics.record_ok_count();
+                last_send_micros.store(run_started.elapsed().as_micros() as i64, Ordering::Relaxed);
+            }
             Err(e) => {
                 metrics.record_err_kind(ErrorKind::Transport);
                 if idx == 0 {
@@ -361,7 +345,6 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
                     burst_remaining = 1;
                 }
                 for _ in 0..burst_remaining {
-                    let a0 = Instant::now();
                     let result: Result<(), String> = match action {
                         GameAction::PickupItem {
                             item_type,
@@ -389,7 +372,11 @@ pub(crate) async fn player_loop_spacetimedb(ctx: SpacetimePlayerLoop) {
                         }
                     };
                     match result {
-                        Ok(()) => action_metrics.record_ok(a0.elapsed()),
+                        Ok(()) => {
+                            action_metrics.record_ok_count();
+                            last_send_micros
+                                .store(run_started.elapsed().as_micros() as i64, Ordering::Relaxed);
+                        }
                         Err(_) => action_metrics.record_err_kind(ErrorKind::Transport),
                     }
                 }
@@ -438,12 +425,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn shared_positions_roundtrip() {
-        let positions = SharedPositions::new(2);
-        positions.set(1, 42.0, -9.0);
-        assert_eq!(positions.get(1), (42.0, -9.0));
     }
 }
