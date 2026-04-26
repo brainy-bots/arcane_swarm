@@ -126,6 +126,10 @@ struct ArcaneRuntime {
     /// (rather than `PlayerLoopShared`) because it's Arcane-specific —
     /// SpacetimeDB backend has its own subscription pipeline.
     delta_cache: Arc<arcane_swarm::DeltaCache>,
+    /// Bytes per `PlayerStatePayload.user_data` payload. Same reasoning as
+    /// `delta_cache` — Arcane-specific knob; SpacetimeDB backend has no
+    /// equivalent opaque-payload field on its movement frames.
+    user_data_bytes: usize,
 }
 
 impl BackendRuntime for ArcaneRuntime {
@@ -155,6 +159,7 @@ impl BackendRuntime for ArcaneRuntime {
                 burst: shared.burst,
                 run_started: shared.run_started,
                 delta_cache: self.delta_cache.clone(),
+                user_data_bytes: self.user_data_bytes,
             },
         ))
     }
@@ -203,6 +208,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
             Arc::new(ArcaneRuntime {
                 endpoint,
                 delta_cache: Arc::new(arcane_swarm::DeltaCache::default()),
+                user_data_bytes: cfg.user_data_bytes,
             })
         }
     };
@@ -560,6 +566,7 @@ async fn main() {
             Arc::new(ArcaneRuntime {
                 endpoint,
                 delta_cache: Arc::new(arcane_swarm::DeltaCache::default()),
+                user_data_bytes: cfg.user_data_bytes,
             })
         }
     };

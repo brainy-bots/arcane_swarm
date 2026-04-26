@@ -52,6 +52,13 @@ pub struct Config {
     pub run_forever: bool,
     pub control_port: u16,
     pub burst: BurstConfig,
+    /// Bytes per `PlayerStatePayload.user_data` payload sent in the per-tick
+    /// PLAYER_STATE frame. Default 0 (lean baseline). Set > 0 to measure the
+    /// realistic-state ceiling — the Arcane backend fills the bytes per
+    /// `(player, tick)` via `protocol::fill_pseudo_user_data`. SpacetimeDB
+    /// backend ignores this knob; its `update_player` path doesn't carry an
+    /// equivalent opaque payload field.
+    pub user_data_bytes: usize,
 }
 
 pub fn parse_args() -> Config {
@@ -73,6 +80,7 @@ pub fn parse_args() -> Config {
     let mut run_forever: bool = false;
     let mut control_port: u16 = 0;
     let mut burst = BurstConfig::default();
+    let mut user_data_bytes: usize = 0;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -180,6 +188,10 @@ pub fn parse_args() -> Config {
                 i += 1;
                 burst.zone_event_window_ms = args[i].parse().unwrap_or(burst.zone_event_window_ms);
             }
+            "--user-data-bytes" => {
+                i += 1;
+                user_data_bytes = args[i].parse().unwrap_or(0);
+            }
             "--help" | "-h" => {
                 eprintln!("arcane-swarm: headless client swarm\n");
                 eprintln!("  --backend MODE        spacetimedb | arcane (default spacetimedb)");
@@ -209,6 +221,7 @@ pub fn parse_args() -> Config {
                 );
                 eprintln!("  --zone-event-period-secs N seconds between all-player convergence events (default 30)");
                 eprintln!("  --zone-event-window-ms N zone event steering window in milliseconds (default 500)");
+                eprintln!("  --user-data-bytes N    bytes per PLAYER_STATE.user_data payload (default 0; Arcane backend only)");
                 eprintln!("  --csv PATH             write metrics CSV to this file");
                 eprintln!(
                     "  --uri URL              SpacetimeDB URI (default http://127.0.0.1:3000)"
@@ -246,5 +259,6 @@ pub fn parse_args() -> Config {
         run_forever,
         control_port,
         burst,
+        user_data_bytes,
     }
 }
