@@ -418,6 +418,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     }
     eprintln!("arcane-swarm(control): exiting.");
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_control_connection(
         stream: tokio::net::TcpStream,
         desired_players: Arc<AtomicU32>,
