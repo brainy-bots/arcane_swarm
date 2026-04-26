@@ -16,6 +16,7 @@
 
 pub mod burst;
 pub mod config;
+pub mod delta_cache;
 pub mod engine_api;
 pub mod metrics;
 pub mod orchestration;
@@ -25,6 +26,7 @@ pub mod reporter;
 
 pub use burst::{burst_actions_to_emit, is_zone_event_active, BurstConfig};
 pub use config::{parse_args, ArcaneEndpoint, Backend, Config, SwarmMode};
+pub use delta_cache::{CachedDelta, DeltaCache};
 pub use engine_api::{EngineRunConfig, EngineRunHandle, EngineSummary, SwarmEngine};
 pub use metrics::{ErrorBreakdown, ErrorKind, Metrics, MetricsSnapshot};
 pub use player::Player;

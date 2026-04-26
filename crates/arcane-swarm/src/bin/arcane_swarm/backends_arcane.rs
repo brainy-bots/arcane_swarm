@@ -33,8 +33,9 @@ use tokio_tungstenite::tungstenite::Message;
 
 use arcane_swarm::{
     encode_game_action, encode_player_state, is_zone_event_active, ArcaneEndpoint, BurstConfig,
-    ErrorKind, Metrics, Player,
+    CachedDelta, DeltaCache, ErrorKind, Metrics, Player,
 };
+use std::collections::HashSet;
 
 #[derive(serde::Deserialize)]
 struct ManagerJoinResponse {
@@ -109,6 +110,11 @@ pub(crate) struct ArcanePlayerLoop {
     pub actions_per_sec: f64,
     pub burst: BurstConfig,
     pub run_started: std::time::Instant,
+    /// Per-driver shared decode cache. The drain task consults this before
+    /// running a full `decode_server`; on hit it skips the postcard parse
+    /// entirely and reads the cached entity-id set. See `delta_cache.rs`
+    /// for the architecture rationale.
+    pub delta_cache: Arc<DeltaCache>,
 }
 
 /// Pick a random game action for this player at this tick.
@@ -157,6 +163,7 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
         actions_per_sec,
         burst,
         run_started,
+        delta_cache,
     } = ctx;
 
     let ws_url = resolve_arcane_ws(&endpoint, &client, idx).await;
@@ -195,52 +202,69 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
     let last_send_unix_drain = last_send_unix_us.clone();
     let my_id = player.id;
     let drain_run_started = run_started;
+    let cache_drain = delta_cache.clone();
     tokio::spawn(async move {
         while !stop_drain.load(Ordering::Relaxed) {
             match stream.next().await {
                 Some(Ok(Message::Binary(bin))) => {
-                    // T_arrival: capture immediately, before any decode work,
-                    // so `drain_us = T3 - T_arrival` is purely on-driver
-                    // post-receive cost (decode + linear scan + record). This
-                    // is clock-sync free.
+                    // T_arrival: capture immediately, before any decode or
+                    // cache work, so `drain_us = T3 - T_arrival` is purely
+                    // on-driver post-receive cost. Clock-sync free.
                     let arrival_us = drain_run_started.elapsed().as_micros() as i64;
                     rm.record_inbound_ok(bin.len() as u64);
-                    // Decode the cluster's broadcast delta and look for our
-                    // own entity_id. The first hit produces a real latency
-                    // sample; extra hits in the same frame (shouldn't happen,
-                    // but defensive) are ignored to avoid double-counting.
-                    if let Ok(ServerFrame::Delta(payload)) = decode_server(&bin) {
-                        if payload.updated.iter().any(|e| e.entity_id == my_id) {
-                            let sent = last_send_drain.load(Ordering::Relaxed);
-                            if sent >= 0 {
-                                let now = drain_run_started.elapsed().as_micros() as i64;
-                                let total_us = (now - sent).max(0) as u64;
-                                let drain_us = (now - arrival_us).max(0) as u64;
-                                // Wire portion: T2 (server stamp, UNIX
-                                // seconds f64) − T1 (driver's send moment in
-                                // UNIX micros). Both endpoints chrony-synced
-                                // to ~1ms on AWS; clock-skew bias is folded
-                                // here. `payload.timestamp <= 0.0` means the
-                                // server didn't stamp this frame (e.g. older
-                                // image), so we skip the wire sample.
-                                let wire_lat = if payload.timestamp > 0.0 {
-                                    let sent_unix = last_send_unix_drain.load(Ordering::Relaxed);
-                                    if sent_unix > 0 {
-                                        let server_us = (payload.timestamp * 1_000_000.0) as i64;
-                                        let wire_us = (server_us - sent_unix).max(0) as u64;
-                                        Some(Duration::from_micros(wire_us))
-                                    } else {
-                                        None
-                                    }
+                    // Cache lookup first. The cluster encodes each broadcast
+                    // once and sends the same bytes to every connected
+                    // player, so 1437 drain tasks per cluster all see
+                    // identical payloads — decoding 1437× is wasted work.
+                    // The first drain to see this frame decodes it and
+                    // populates the cache; the rest hit the cache and skip
+                    // the postcard parse. See `delta_cache.rs`.
+                    let cached: Arc<CachedDelta> = match cache_drain.lookup(&bin) {
+                        Some(e) => e,
+                        None => match decode_server(&bin) {
+                            Ok(ServerFrame::Delta(payload)) => {
+                                let entity_ids: HashSet<_> =
+                                    payload.updated.iter().map(|e| e.entity_id).collect();
+                                let entry = Arc::new(CachedDelta {
+                                    entity_ids,
+                                    server_ts: payload.timestamp,
+                                });
+                                cache_drain.insert(&bin, entry.clone());
+                                entry
+                            }
+                            Err(_) => continue,
+                        },
+                    };
+                    if cached.entity_ids.contains(&my_id) {
+                        let sent = last_send_drain.load(Ordering::Relaxed);
+                        if sent >= 0 {
+                            let now = drain_run_started.elapsed().as_micros() as i64;
+                            let total_us = (now - sent).max(0) as u64;
+                            let drain_us = (now - arrival_us).max(0) as u64;
+                            // Wire portion: T2 (server stamp, UNIX seconds
+                            // f64) − T1 (driver's send moment in UNIX
+                            // micros). Endpoints chrony-synced to ~1ms on
+                            // AWS; clock-skew bias is folded here.
+                            // `server_ts <= 0.0` means the server didn't
+                            // stamp this frame (older image), skip wire
+                            // sample.
+                            let wire_lat = if cached.server_ts > 0.0 {
+                                let sent_unix = last_send_unix_drain.load(Ordering::Relaxed);
+                                if sent_unix > 0 {
+                                    let server_us = (cached.server_ts * 1_000_000.0) as i64;
+                                    let wire_us = (server_us - sent_unix).max(0) as u64;
+                                    Some(Duration::from_micros(wire_us))
                                 } else {
                                     None
-                                };
-                                latency_metrics.record_ok_decomposed(
-                                    Duration::from_micros(total_us),
-                                    wire_lat,
-                                    Duration::from_micros(drain_us),
-                                );
-                            }
+                                }
+                            } else {
+                                None
+                            };
+                            latency_metrics.record_ok_decomposed(
+                                Duration::from_micros(total_us),
+                                wire_lat,
+                                Duration::from_micros(drain_us),
+                            );
                         }
                     }
                 }
