@@ -9,7 +9,7 @@
 //! default — see brainy-bots/arcane#28 for the motivation + microbench.
 
 use arcane_wire::{
-    encode_client, ClientFrame, GameActionPayload, PlayerStatePayload, Vec3 as WireVec3,
+    encode_client, ClientFrame, GameActionPayload, PlayerStatePayload, Vec3 as WireVec3, Vec3Q,
 };
 
 /// Spatial query radius (server units) for SpacetimeDB read simulation.
@@ -35,10 +35,15 @@ pub fn encode_player_state(
     vz: f64,
     user_data: &[u8],
 ) -> Vec<u8> {
+    // Quantize at the wire boundary: continuous f64 from the simulated
+    // player tick becomes i16 on the wire (~3-9 B per Vec3 vs 24 B). See
+    // arcane_wire::Vec3Q for the scale + range tradeoff. Sub-unit precision
+    // is lost; the benchmark world's noise floor (collision_radius=50) is
+    // well above 1 unit so this is invisible to the kinematic sim.
     let frame = ClientFrame::PlayerState(PlayerStatePayload {
         entity_id: *id,
-        position: WireVec3::new(x, y, z),
-        velocity: WireVec3::new(vx, vy, vz),
+        position: Vec3Q::from_vec3(WireVec3::new(x, y, z)),
+        velocity: Vec3Q::from_vec3(WireVec3::new(vx, vy, vz)),
         user_data: user_data.to_vec(),
     });
     // encode_client returns Err only on allocator failure or serialize-bug;
@@ -113,8 +118,9 @@ mod tests {
             panic!("expected PlayerState variant");
         };
         assert_eq!(payload.entity_id, id);
-        assert_eq!(payload.position.x, 1.25);
-        assert_eq!(payload.velocity.z, -0.1);
+        // Vec3Q quantization: 1.25 rounds to 1; -0.1 rounds to 0.
+        assert_eq!(payload.position.x, 1i16);
+        assert_eq!(payload.velocity.z, 0i16);
         assert!(payload.user_data.is_empty());
     }
 
