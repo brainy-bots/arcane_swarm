@@ -486,8 +486,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                     } else {
                         0.0
                     };
-                    let (cache_hits, cache_misses) =
-                        backend_runtime.snapshot_cache_counters();
+                    let (cache_hits, cache_misses) = backend_runtime.snapshot_cache_counters();
                     let cache_hit_pct = if cache_hits + cache_misses > 0 {
                         100.0 * cache_hits as f64 / (cache_hits + cache_misses) as f64
                     } else {

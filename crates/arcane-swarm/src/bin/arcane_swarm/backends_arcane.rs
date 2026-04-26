@@ -315,8 +315,7 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
                 // UNIX wall-clock copy of the same moment for the wire
                 // (T2 - T1) portion of the latency decomposition.
                 if let Ok(d) = SystemTime::now().duration_since(UNIX_EPOCH) {
-                    last_send_unix_us
-                        .store(d.as_micros() as i64, Ordering::Relaxed);
+                    last_send_unix_us.store(d.as_micros() as i64, Ordering::Relaxed);
                 }
             }
             Err(e) => {
@@ -345,8 +344,7 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
                         last_send_micros
                             .store(run_started.elapsed().as_micros() as i64, Ordering::Relaxed);
                         if let Ok(d) = SystemTime::now().duration_since(UNIX_EPOCH) {
-                            last_send_unix_us
-                                .store(d.as_micros() as i64, Ordering::Relaxed);
+                            last_send_unix_us.store(d.as_micros() as i64, Ordering::Relaxed);
                         }
                     }
                     Err(e) => {
