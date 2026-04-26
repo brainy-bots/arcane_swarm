@@ -446,13 +446,33 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                     } else {
                         0.0
                     };
+                    // Wire (T2-T1) and drain (T3-T_arrival) decomposition,
+                    // populated by `record_ok_decomposed` in the Arcane drain
+                    // loop. Zero-sample fields print as 0.00 so harness
+                    // parsers don't break — SpacetimeDB-only mode never sets
+                    // them. See `Metrics::record_ok_decomposed` for the
+                    // timeline.
+                    let wire_avg_ms = if snap.wire_latency_samples > 0 {
+                        snap.avg_wire_latency_us as f64 / 1000.0
+                    } else {
+                        0.0
+                    };
+                    let drain_avg_ms = if snap.drain_latency_samples > 0 {
+                        snap.avg_drain_latency_us as f64 / 1000.0
+                    } else {
+                        0.0
+                    };
                     eprintln!(
-                        "FINAL: players={} total_calls={} total_oks={} total_errs={} lat_avg_ms={:.2} err_json={}",
+                        "FINAL: players={} total_calls={} total_oks={} total_errs={} lat_avg_ms={:.2} wire_avg_ms={:.2} drain_avg_ms={:.2} wire_samples={} drain_samples={} err_json={}",
                         players,
                         total_calls,
                         snap.ok,
                         snap.err,
                         lat_avg_ms,
+                        wire_avg_ms,
+                        drain_avg_ms,
+                        snap.wire_latency_samples,
+                        snap.drain_latency_samples,
                         snap.errors.to_json(),
                     );
                 }

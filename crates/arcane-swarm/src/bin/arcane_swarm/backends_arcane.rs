@@ -24,7 +24,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arcane_wire::{decode_server, ServerFrame};
 use futures_util::{SinkExt, StreamExt};
@@ -182,17 +182,28 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
     // latency = now - last_send. Using a shared atomic rather than passing
     // through a channel keeps the hot paths lock-free.
     let last_send_micros = Arc::new(AtomicI64::new(-1));
+    // Same instant in UNIX micros — used for the cross-clock T2 - T1 wire
+    // portion of the latency decomposition. Updated alongside
+    // `last_send_micros` at every outbound write so they refer to the same
+    // moment.
+    let last_send_unix_us = Arc::new(AtomicI64::new(-1));
 
     let stop_drain = stop.clone();
     let rm = read_metrics.clone();
     let latency_metrics = metrics.clone();
     let last_send_drain = last_send_micros.clone();
+    let last_send_unix_drain = last_send_unix_us.clone();
     let my_id = player.id;
     let drain_run_started = run_started;
     tokio::spawn(async move {
         while !stop_drain.load(Ordering::Relaxed) {
             match stream.next().await {
                 Some(Ok(Message::Binary(bin))) => {
+                    // T_arrival: capture immediately, before any decode work,
+                    // so `drain_us = T3 - T_arrival` is purely on-driver
+                    // post-receive cost (decode + linear scan + record). This
+                    // is clock-sync free.
+                    let arrival_us = drain_run_started.elapsed().as_micros() as i64;
                     rm.record_inbound_ok(bin.len() as u64);
                     // Decode the cluster's broadcast delta and look for our
                     // own entity_id. The first hit produces a real latency
@@ -203,8 +214,32 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
                             let sent = last_send_drain.load(Ordering::Relaxed);
                             if sent >= 0 {
                                 let now = drain_run_started.elapsed().as_micros() as i64;
-                                let lat_us = (now - sent).max(0) as u64;
-                                latency_metrics.record_ok(Duration::from_micros(lat_us));
+                                let total_us = (now - sent).max(0) as u64;
+                                let drain_us = (now - arrival_us).max(0) as u64;
+                                // Wire portion: T2 (server stamp, UNIX
+                                // seconds f64) − T1 (driver's send moment in
+                                // UNIX micros). Both endpoints chrony-synced
+                                // to ~1ms on AWS; clock-skew bias is folded
+                                // here. `payload.timestamp <= 0.0` means the
+                                // server didn't stamp this frame (e.g. older
+                                // image), so we skip the wire sample.
+                                let wire_lat = if payload.timestamp > 0.0 {
+                                    let sent_unix = last_send_unix_drain.load(Ordering::Relaxed);
+                                    if sent_unix > 0 {
+                                        let server_us = (payload.timestamp * 1_000_000.0) as i64;
+                                        let wire_us = (server_us - sent_unix).max(0) as u64;
+                                        Some(Duration::from_micros(wire_us))
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+                                latency_metrics.record_ok_decomposed(
+                                    Duration::from_micros(total_us),
+                                    wire_lat,
+                                    Duration::from_micros(drain_us),
+                                );
                             }
                         }
                     }
@@ -253,6 +288,12 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
                 // drain task when it sees the cluster echo this write back.
                 metrics.record_ok_count();
                 last_send_micros.store(run_started.elapsed().as_micros() as i64, Ordering::Relaxed);
+                // UNIX wall-clock copy of the same moment for the wire
+                // (T2 - T1) portion of the latency decomposition.
+                if let Ok(d) = SystemTime::now().duration_since(UNIX_EPOCH) {
+                    last_send_unix_us
+                        .store(d.as_micros() as i64, Ordering::Relaxed);
+                }
             }
             Err(e) => {
                 metrics.record_err_kind(ErrorKind::NotDelivered);
@@ -279,6 +320,10 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
                         action_metrics.record_ok_count();
                         last_send_micros
                             .store(run_started.elapsed().as_micros() as i64, Ordering::Relaxed);
+                        if let Ok(d) = SystemTime::now().duration_since(UNIX_EPOCH) {
+                            last_send_unix_us
+                                .store(d.as_micros() as i64, Ordering::Relaxed);
+                        }
                     }
                     Err(e) => {
                         action_metrics.record_err();
