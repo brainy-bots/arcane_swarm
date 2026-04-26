@@ -32,8 +32,8 @@ use tokio::time;
 use tokio_tungstenite::tungstenite::Message;
 
 use arcane_swarm::{
-    encode_game_action, encode_player_state, is_zone_event_active, ArcaneEndpoint, BurstConfig,
-    CachedDelta, DeltaCache, ErrorKind, Metrics, Player,
+    encode_game_action, encode_player_state, fill_pseudo_user_data, is_zone_event_active,
+    ArcaneEndpoint, BurstConfig, CachedDelta, DeltaCache, ErrorKind, Metrics, Player,
 };
 use std::collections::HashSet;
 
@@ -115,6 +115,10 @@ pub(crate) struct ArcanePlayerLoop {
     /// entirely and reads the cached entity-id set. See `delta_cache.rs`
     /// for the architecture rationale.
     pub delta_cache: Arc<DeltaCache>,
+    /// Bytes per `PlayerStatePayload.user_data` payload. 0 = lean baseline
+    /// (the historical behavior). Set > 0 by the `--user-data-bytes` CLI
+    /// flag to measure the realistic-state ceiling.
+    pub user_data_bytes: usize,
 }
 
 /// Pick a random game action for this player at this tick.
@@ -164,6 +168,7 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
         burst,
         run_started,
         delta_cache,
+        user_data_bytes,
     } = ctx;
 
     let ws_url = resolve_arcane_ws(&endpoint, &client, idx).await;
@@ -294,6 +299,16 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
     let mut last_action = std::time::Instant::now();
     let mut action_tick: u64 = 0;
 
+    // Reusable buffer for the per-tick pseudo-user-data payload. Refilled in
+    // place each tick so the realistic-state benchmark (UserDataBytes > 0)
+    // doesn't allocate a fresh Vec on every send. Empty when user_data_bytes=0.
+    let mut user_data_buf: Vec<u8> = Vec::with_capacity(user_data_bytes);
+    // Stable per-player seed for the deterministic PRNG. Lower 64 bits of the
+    // entity UUID — varies across players, stable across ticks for the same
+    // player.
+    let user_data_seed = (player.id.as_u128() as u64) ^ (player.id.as_u128() >> 64) as u64;
+    let mut send_tick: u64 = 0;
+
     while !stop.load(Ordering::Relaxed) {
         interval.tick().await;
         if is_zone_event_active(run_started.elapsed().as_millis() as u64, burst) {
@@ -301,10 +316,27 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
         }
         player.tick(tick_dt, cluster_flag.load(Ordering::Relaxed));
 
+        send_tick = send_tick.wrapping_add(1);
+        if user_data_bytes > 0 {
+            fill_pseudo_user_data(
+                &mut user_data_buf,
+                user_data_bytes,
+                user_data_seed,
+                send_tick,
+            );
+        }
+
         // Send movement — binary postcard frame for fairness with SpacetimeDB's
         // BSATN. See brainy-bots/arcane#28 for motivation.
         let msg = encode_player_state(
-            &player.id, player.x, player.y, player.z, player.vx, player.vy, player.vz,
+            &player.id,
+            player.x,
+            player.y,
+            player.z,
+            player.vx,
+            player.vy,
+            player.vz,
+            &user_data_buf,
         );
         match sink.send(Message::Binary(msg)).await {
             Ok(_) => {

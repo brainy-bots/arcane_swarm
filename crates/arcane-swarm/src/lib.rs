@@ -30,5 +30,7 @@ pub use delta_cache::{CachedDelta, DeltaCache};
 pub use engine_api::{EngineRunConfig, EngineRunHandle, EngineSummary, SwarmEngine};
 pub use metrics::{ErrorBreakdown, ErrorKind, Metrics, MetricsSnapshot};
 pub use player::Player;
-pub use protocol::{encode_game_action, encode_player_state, VISIBILITY_RADIUS};
+pub use protocol::{
+    encode_game_action, encode_player_state, fill_pseudo_user_data, VISIBILITY_RADIUS,
+};
 pub use reporter::{fmt_bytes, run_reporter, sample_proc, ReporterConfig};
