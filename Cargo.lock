@@ -92,7 +92,7 @@ dependencies = [
 [[package]]
 name = "arcane-wire"
 version = "0.1.0"
-source = "git+https://github.com/brainy-bots/arcane.git?branch=main#5aa2ab4fb5e8fb966e90264b75068605fd378bb7"
+source = "git+https://github.com/brainy-bots/arcane.git?branch=main#1af872dc7c3b9fa5f70f5d7bddc842f719becd01"
 dependencies = [
  "postcard",
  "serde",
@@ -2429,7 +2429,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
