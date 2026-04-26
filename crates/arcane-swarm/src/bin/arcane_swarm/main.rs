@@ -56,6 +56,13 @@ pub(crate) trait BackendRuntime: Send + Sync {
         params: &PlayerSpawnParams,
         read_rate: f64,
     ) -> Option<tokio::task::JoinHandle<()>>;
+
+    /// Snapshot+reset cache hit/miss counters if this backend has a per-frame
+    /// decode cache. Default returns `(0, 0)` so backends without one (e.g.
+    /// SpacetimeDB) report zero in the FINAL line without special-casing.
+    fn snapshot_cache_counters(&self) -> (u64, u64) {
+        (0, 0)
+    }
 }
 
 struct SpacetimeRuntime {
@@ -114,6 +121,11 @@ impl BackendRuntime for SpacetimeRuntime {
 
 struct ArcaneRuntime {
     endpoint: ArcaneEndpoint,
+    /// Per-driver shared decode cache. Populated lazily by drain tasks; see
+    /// `arcane_swarm::delta_cache` for why it exists. Lives on the runtime
+    /// (rather than `PlayerLoopShared`) because it's Arcane-specific —
+    /// SpacetimeDB backend has its own subscription pipeline.
+    delta_cache: Arc<arcane_swarm::DeltaCache>,
 }
 
 impl BackendRuntime for ArcaneRuntime {
@@ -142,6 +154,7 @@ impl BackendRuntime for ArcaneRuntime {
                 actions_per_sec: shared.actions_per_sec,
                 burst: shared.burst,
                 run_started: shared.run_started,
+                delta_cache: self.delta_cache.clone(),
             },
         ))
     }
@@ -153,6 +166,10 @@ impl BackendRuntime for ArcaneRuntime {
         _read_rate: f64,
     ) -> Option<tokio::task::JoinHandle<()>> {
         None
+    }
+
+    fn snapshot_cache_counters(&self) -> (u64, u64) {
+        self.delta_cache.snapshot_and_reset_counters()
     }
 }
 
@@ -183,7 +200,10 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                 },
                 None => ArcaneEndpoint::SingleUrl(cfg.arcane_ws.clone()),
             };
-            Arc::new(ArcaneRuntime { endpoint })
+            Arc::new(ArcaneRuntime {
+                endpoint,
+                delta_cache: Arc::new(arcane_swarm::DeltaCache::default()),
+            })
         }
     };
     let backend_name = backend_runtime.name();
@@ -324,6 +344,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         let metrics = metrics.clone();
         let action_metrics = action_metrics.clone();
         let read_metrics = read_metrics.clone();
+        let backend_runtime = backend_runtime.clone();
         Some(tokio::spawn(async move {
             use tokio::net::TcpListener;
 
@@ -343,6 +364,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                 let metrics = metrics.clone();
                 let action_metrics = action_metrics.clone();
                 let read_metrics = read_metrics.clone();
+                let backend_runtime = backend_runtime.clone();
 
                 tokio::spawn(async move {
                     let _ = handle_control_connection(
@@ -353,6 +375,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                         metrics,
                         action_metrics,
                         read_metrics,
+                        backend_runtime,
                     )
                     .await;
                 });
@@ -395,6 +418,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     }
     eprintln!("arcane-swarm(control): exiting.");
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_control_connection(
         stream: tokio::net::TcpStream,
         desired_players: Arc<AtomicU32>,
@@ -403,6 +427,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         metrics: Arc<Metrics>,
         action_metrics: Arc<Metrics>,
         read_metrics: Arc<Metrics>,
+        backend_runtime: Arc<dyn BackendRuntime>,
     ) -> Result<(), String> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -446,13 +471,42 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                     } else {
                         0.0
                     };
+                    // Wire (T2-T1) and drain (T3-T_arrival) decomposition,
+                    // populated by `record_ok_decomposed` in the Arcane drain
+                    // loop. Zero-sample fields print as 0.00 so harness
+                    // parsers don't break — SpacetimeDB-only mode never sets
+                    // them. See `Metrics::record_ok_decomposed` for the
+                    // timeline.
+                    let wire_avg_ms = if snap.wire_latency_samples > 0 {
+                        snap.avg_wire_latency_us as f64 / 1000.0
+                    } else {
+                        0.0
+                    };
+                    let drain_avg_ms = if snap.drain_latency_samples > 0 {
+                        snap.avg_drain_latency_us as f64 / 1000.0
+                    } else {
+                        0.0
+                    };
+                    let (cache_hits, cache_misses) = backend_runtime.snapshot_cache_counters();
+                    let cache_hit_pct = if cache_hits + cache_misses > 0 {
+                        100.0 * cache_hits as f64 / (cache_hits + cache_misses) as f64
+                    } else {
+                        0.0
+                    };
                     eprintln!(
-                        "FINAL: players={} total_calls={} total_oks={} total_errs={} lat_avg_ms={:.2} err_json={}",
+                        "FINAL: players={} total_calls={} total_oks={} total_errs={} lat_avg_ms={:.2} wire_avg_ms={:.2} drain_avg_ms={:.2} wire_samples={} drain_samples={} cache_hits={} cache_misses={} cache_hit_pct={:.1} err_json={}",
                         players,
                         total_calls,
                         snap.ok,
                         snap.err,
                         lat_avg_ms,
+                        wire_avg_ms,
+                        drain_avg_ms,
+                        snap.wire_latency_samples,
+                        snap.drain_latency_samples,
+                        cache_hits,
+                        cache_misses,
+                        cache_hit_pct,
                         snap.errors.to_json(),
                     );
                 }
@@ -503,7 +557,10 @@ async fn main() {
                 },
                 None => ArcaneEndpoint::SingleUrl(cfg.arcane_ws.clone()),
             };
-            Arc::new(ArcaneRuntime { endpoint })
+            Arc::new(ArcaneRuntime {
+                endpoint,
+                delta_cache: Arc::new(arcane_swarm::DeltaCache::default()),
+            })
         }
     };
     let backend_name = backend_runtime.name();

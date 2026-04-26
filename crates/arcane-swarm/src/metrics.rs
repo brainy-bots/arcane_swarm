@@ -63,6 +63,25 @@ impl ErrorBreakdown {
 }
 
 /// Aggregated stats; produced by [`Metrics::snapshot_and_reset`].
+///
+/// `avg_latency_us` is the existing client-perceived latency
+/// (T3_driver - T1_driver, where T1 is the player's outbound send and T3 is
+/// the moment the drain task matched the player's own entity in an inbound
+/// frame). The `wire_*` and `drain_*` fields are an optional decomposition
+/// of that same latency:
+///
+///   total = wire + arrival_to_match
+///
+///   - `wire_*`: T2_server - T1_driver, captures network upstream + tick
+///     alignment + server-side processing. Cross-clock (driver vs cluster
+///     EC2 instances) so a chrony offset of ~1ms is folded into this number.
+///   - `arrival_to_match_*`: T3_driver - T_arrival_driver, purely on-driver
+///     timing of "WebSocket frame received → decode → linear scan finds
+///     player's own entity → record_ok". Clock-sync free.
+///
+/// Decomposition is only populated when the cluster fills the wire
+/// `DeltaPayload.timestamp` field (Arcane backend); SpacetimeDB-only mode
+/// leaves these zero.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MetricsSnapshot {
     pub ok: u64,
@@ -73,6 +92,12 @@ pub struct MetricsSnapshot {
     pub latency_samples: u64,
     pub bytes: u64,
     pub errors: ErrorBreakdown,
+    pub avg_wire_latency_us: u64,
+    pub max_wire_latency_us: u64,
+    pub wire_latency_samples: u64,
+    pub avg_drain_latency_us: u64,
+    pub max_drain_latency_us: u64,
+    pub drain_latency_samples: u64,
 }
 
 /// Thread-safe rolling metrics for OK/err counts and latencies (microseconds).
@@ -88,6 +113,14 @@ pub struct Metrics {
     err_http_status: AtomicU64,
     err_transport: AtomicU64,
     err_connection_drop: AtomicU64,
+    // Optional decomposition of the existing latency_* into wire-side and
+    // driver-side portions. See `MetricsSnapshot` for the timeline.
+    wire_latency_sum_us: AtomicU64,
+    wire_latency_max_us: AtomicU64,
+    wire_latency_samples: AtomicU64,
+    drain_latency_sum_us: AtomicU64,
+    drain_latency_max_us: AtomicU64,
+    drain_latency_samples: AtomicU64,
 }
 
 impl Metrics {
@@ -104,6 +137,45 @@ impl Metrics {
             err_http_status: AtomicU64::new(0),
             err_transport: AtomicU64::new(0),
             err_connection_drop: AtomicU64::new(0),
+            wire_latency_sum_us: AtomicU64::new(0),
+            wire_latency_max_us: AtomicU64::new(0),
+            wire_latency_samples: AtomicU64::new(0),
+            drain_latency_sum_us: AtomicU64::new(0),
+            drain_latency_max_us: AtomicU64::new(0),
+            drain_latency_samples: AtomicU64::new(0),
+        }
+    }
+
+    /// Record a successful echo with full T1/T2/T3 decomposition.
+    ///
+    /// `total_latency` is the existing client-perceived latency T3 - T1.
+    /// `wire_latency` is T2 - T1 (cross-clock; pass `None` if the server
+    /// didn't stamp a usable timestamp on this frame). `drain_latency` is
+    /// T3 - T_arrival, measured purely on the driver side.
+    ///
+    /// All three feed the same OK counter and total-latency histograms as
+    /// [`record_ok`], so existing reporting paths continue to work; the
+    /// new fields are populated additively.
+    pub fn record_ok_decomposed(
+        &self,
+        total_latency: Duration,
+        wire_latency: Option<Duration>,
+        drain_latency: Duration,
+    ) {
+        self.record_ok(total_latency);
+        let drain_us = drain_latency.as_micros() as u64;
+        self.drain_latency_sum_us
+            .fetch_add(drain_us, Ordering::Relaxed);
+        self.drain_latency_samples.fetch_add(1, Ordering::Relaxed);
+        self.drain_latency_max_us
+            .fetch_max(drain_us, Ordering::Relaxed);
+        if let Some(w) = wire_latency {
+            let wire_us = w.as_micros() as u64;
+            self.wire_latency_sum_us
+                .fetch_add(wire_us, Ordering::Relaxed);
+            self.wire_latency_samples.fetch_add(1, Ordering::Relaxed);
+            self.wire_latency_max_us
+                .fetch_max(wire_us, Ordering::Relaxed);
         }
     }
 
@@ -179,6 +251,12 @@ impl Metrics {
             transport: self.err_transport.swap(0, Ordering::Relaxed),
             connection_drop: self.err_connection_drop.swap(0, Ordering::Relaxed),
         };
+        let wire_sum = self.wire_latency_sum_us.swap(0, Ordering::Relaxed);
+        let wire_max = self.wire_latency_max_us.swap(0, Ordering::Relaxed);
+        let wire_n = self.wire_latency_samples.swap(0, Ordering::Relaxed);
+        let drain_sum = self.drain_latency_sum_us.swap(0, Ordering::Relaxed);
+        let drain_max = self.drain_latency_max_us.swap(0, Ordering::Relaxed);
+        let drain_n = self.drain_latency_samples.swap(0, Ordering::Relaxed);
         MetricsSnapshot {
             ok,
             err,
@@ -188,6 +266,12 @@ impl Metrics {
             latency_samples: n,
             bytes,
             errors,
+            avg_wire_latency_us: wire_sum.checked_div(wire_n).unwrap_or(0),
+            max_wire_latency_us: wire_max,
+            wire_latency_samples: wire_n,
+            avg_drain_latency_us: drain_sum.checked_div(drain_n).unwrap_or(0),
+            max_drain_latency_us: drain_max,
+            drain_latency_samples: drain_n,
         }
     }
 }
