@@ -479,7 +479,8 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                             // being meaningful — the orchestrator must
                             // provision more drivers instead. Warning goes
                             // to stderr (where the harness can match it).
-                            let target = if max_players_per_driver > 0 && v > max_players_per_driver {
+                            let target = if max_players_per_driver > 0 && v > max_players_per_driver
+                            {
                                 eprintln!(
                                     "  [cap] SET_PLAYERS desired={} cap={} — refusing to spawn beyond cap; provision more drivers",
                                     v, max_players_per_driver
