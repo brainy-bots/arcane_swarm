@@ -358,6 +358,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         let action_metrics = action_metrics.clone();
         let read_metrics = read_metrics.clone();
         let backend_runtime = backend_runtime.clone();
+        let max_players_per_driver = cfg.max_players_per_driver;
         Some(tokio::spawn(async move {
             use tokio::net::TcpListener;
 
@@ -389,6 +390,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                         action_metrics,
                         read_metrics,
                         backend_runtime,
+                        max_players_per_driver,
                     )
                     .await;
                 });
@@ -444,6 +446,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         action_metrics: Arc<Metrics>,
         read_metrics: Arc<Metrics>,
         backend_runtime: Arc<dyn BackendRuntime>,
+        max_players_per_driver: u32,
     ) -> Result<(), String> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -469,7 +472,23 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                 "SET_PLAYERS" => {
                     if let Some(n) = parts.next() {
                         if let Ok(v) = n.parse::<u32>() {
-                            desired_players.store(v, Ordering::Relaxed);
+                            // Hard safety cap: when --max-players-per-driver
+                            // is set, refuse to spawn beyond it. Multi-driver
+                            // runs use this so a driver never enters its
+                            // soft-saturation zone where measurements stop
+                            // being meaningful — the orchestrator must
+                            // provision more drivers instead. Warning goes
+                            // to stderr (where the harness can match it).
+                            let target = if max_players_per_driver > 0 && v > max_players_per_driver {
+                                eprintln!(
+                                    "  [cap] SET_PLAYERS desired={} cap={} — refusing to spawn beyond cap; provision more drivers",
+                                    v, max_players_per_driver
+                                );
+                                max_players_per_driver
+                            } else {
+                                v
+                            };
+                            desired_players.store(target, Ordering::Relaxed);
                         }
                     }
                 }
