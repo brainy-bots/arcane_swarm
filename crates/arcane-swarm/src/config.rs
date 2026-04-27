@@ -59,6 +59,20 @@ pub struct Config {
     /// backend ignores this knob; its `update_player` path doesn't carry an
     /// equivalent opaque payload field.
     pub user_data_bytes: usize,
+    /// Milliseconds to sleep between consecutive player spawns. Default 0 =
+    /// burst-spawn (historical behavior). Set N > 0 to pace the per-driver
+    /// join rate when running multiple drivers against one manager — the
+    /// harness keeps aggregate manager join rate constant by scaling this
+    /// with driver count.
+    pub inter_spawn_delay_ms: u32,
+    /// Hard safety cap on simultaneously-active players per driver process.
+    /// Default 0 = no cap (historical behavior; max_players is the only
+    /// limit). Set > 0 to refuse SET_PLAYERS values above this number; the
+    /// swarm clamps to the cap and emits `[cap] desired=X cap=Y refusing` to
+    /// stderr. Used by multi-driver runs so a single driver can't be pushed
+    /// into the soft-saturation zone where measurements become unreliable —
+    /// the orchestrator must provision more drivers instead.
+    pub max_players_per_driver: u32,
 }
 
 pub fn parse_args() -> Config {
@@ -81,6 +95,8 @@ pub fn parse_args() -> Config {
     let mut control_port: u16 = 0;
     let mut burst = BurstConfig::default();
     let mut user_data_bytes: usize = 0;
+    let mut inter_spawn_delay_ms: u32 = 0;
+    let mut max_players_per_driver: u32 = 0;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -192,6 +208,14 @@ pub fn parse_args() -> Config {
                 i += 1;
                 user_data_bytes = args[i].parse().unwrap_or(0);
             }
+            "--inter-spawn-delay-ms" => {
+                i += 1;
+                inter_spawn_delay_ms = args[i].parse().unwrap_or(0);
+            }
+            "--max-players-per-driver" => {
+                i += 1;
+                max_players_per_driver = args[i].parse().unwrap_or(0);
+            }
             "--help" | "-h" => {
                 eprintln!("arcane-swarm: headless client swarm\n");
                 eprintln!("  --backend MODE        spacetimedb | arcane (default spacetimedb)");
@@ -222,6 +246,8 @@ pub fn parse_args() -> Config {
                 eprintln!("  --zone-event-period-secs N seconds between all-player convergence events (default 30)");
                 eprintln!("  --zone-event-window-ms N zone event steering window in milliseconds (default 500)");
                 eprintln!("  --user-data-bytes N    bytes per PLAYER_STATE.user_data payload (default 0; Arcane backend only)");
+                eprintln!("  --inter-spawn-delay-ms N  ms between consecutive player spawns (default 0; multi-driver join-rate pacing)");
+                eprintln!("  --max-players-per-driver N  hard safety cap on simultaneously-active players (default 0 = no cap; multi-driver runs set this conservatively)");
                 eprintln!("  --csv PATH             write metrics CSV to this file");
                 eprintln!(
                     "  --uri URL              SpacetimeDB URI (default http://127.0.0.1:3000)"
@@ -260,5 +286,7 @@ pub fn parse_args() -> Config {
         control_port,
         burst,
         user_data_bytes,
+        inter_spawn_delay_ms,
+        max_players_per_driver,
     }
 }

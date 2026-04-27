@@ -326,6 +326,10 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     // movement WebSocket and are driven from inside the player loop).
     let initial = desired_players.load(Ordering::Relaxed) as usize;
     let mut current_spawned: usize = 0;
+    // Multi-driver join-rate pacing: when the harness runs N drivers against
+    // one manager, each driver paces its spawns so the aggregate join rate
+    // matches single-driver behavior. Default 0 = burst-spawn unchanged.
+    let inter_spawn = Duration::from_millis(cfg.inter_spawn_delay_ms as u64);
 
     while current_spawned < initial {
         let idx = current_spawned;
@@ -340,6 +344,9 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         };
         spawn_control_mode_player(&mut kit, idx, desired_total);
         current_spawned += 1;
+        if cfg.inter_spawn_delay_ms > 0 {
+            tokio::time::sleep(inter_spawn).await;
+        }
     }
 
     // TCP control server
@@ -351,6 +358,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         let action_metrics = action_metrics.clone();
         let read_metrics = read_metrics.clone();
         let backend_runtime = backend_runtime.clone();
+        let max_players_per_driver = cfg.max_players_per_driver;
         Some(tokio::spawn(async move {
             use tokio::net::TcpListener;
 
@@ -382,6 +390,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                         action_metrics,
                         read_metrics,
                         backend_runtime,
+                        max_players_per_driver,
                     )
                     .await;
                 });
@@ -405,6 +414,9 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                     read_rate: cfg.read_rate,
                 };
                 spawn_control_mode_player(&mut kit, idx, desired_total);
+                if cfg.inter_spawn_delay_ms > 0 {
+                    tokio::time::sleep(inter_spawn).await;
+                }
             }
             current_spawned = target;
         } else if target < current_spawned {
@@ -434,6 +446,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         action_metrics: Arc<Metrics>,
         read_metrics: Arc<Metrics>,
         backend_runtime: Arc<dyn BackendRuntime>,
+        max_players_per_driver: u32,
     ) -> Result<(), String> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -459,7 +472,24 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                 "SET_PLAYERS" => {
                     if let Some(n) = parts.next() {
                         if let Ok(v) = n.parse::<u32>() {
-                            desired_players.store(v, Ordering::Relaxed);
+                            // Hard safety cap: when --max-players-per-driver
+                            // is set, refuse to spawn beyond it. Multi-driver
+                            // runs use this so a driver never enters its
+                            // soft-saturation zone where measurements stop
+                            // being meaningful — the orchestrator must
+                            // provision more drivers instead. Warning goes
+                            // to stderr (where the harness can match it).
+                            let target = if max_players_per_driver > 0 && v > max_players_per_driver
+                            {
+                                eprintln!(
+                                    "  [cap] SET_PLAYERS desired={} cap={} — refusing to spawn beyond cap; provision more drivers",
+                                    v, max_players_per_driver
+                                );
+                                max_players_per_driver
+                            } else {
+                                v
+                            };
+                            desired_players.store(target, Ordering::Relaxed);
                         }
                     }
                 }
