@@ -326,6 +326,10 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     // movement WebSocket and are driven from inside the player loop).
     let initial = desired_players.load(Ordering::Relaxed) as usize;
     let mut current_spawned: usize = 0;
+    // Multi-driver join-rate pacing: when the harness runs N drivers against
+    // one manager, each driver paces its spawns so the aggregate join rate
+    // matches single-driver behavior. Default 0 = burst-spawn unchanged.
+    let inter_spawn = Duration::from_millis(cfg.inter_spawn_delay_ms as u64);
 
     while current_spawned < initial {
         let idx = current_spawned;
@@ -340,6 +344,9 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         };
         spawn_control_mode_player(&mut kit, idx, desired_total);
         current_spawned += 1;
+        if cfg.inter_spawn_delay_ms > 0 {
+            tokio::time::sleep(inter_spawn).await;
+        }
     }
 
     // TCP control server
@@ -405,6 +412,9 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                     read_rate: cfg.read_rate,
                 };
                 spawn_control_mode_player(&mut kit, idx, desired_total);
+                if cfg.inter_spawn_delay_ms > 0 {
+                    tokio::time::sleep(inter_spawn).await;
+                }
             }
             current_spawned = target;
         } else if target < current_spawned {
