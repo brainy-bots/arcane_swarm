@@ -10,12 +10,31 @@ use tokio::time;
 
 use crate::metrics::{ErrorBreakdown, Metrics, MetricsSnapshot};
 
+/// Get the number of clock ticks per second on Linux (sysconf(_SC_CLK_TCK)).
+/// Returns 100 if the syscall fails or on non-Linux platforms (the conventional default).
+#[cfg(target_os = "linux")]
+fn get_clock_ticks_per_second() -> u64 {
+    unsafe {
+        let ticks = libc::sysconf(libc::_SC_CLK_TCK);
+        if ticks > 0 {
+            ticks as u64
+        } else {
+            100
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn get_clock_ticks_per_second() -> u64 {
+    100
+}
+
 /// One snapshot of the driver process's CPU + RSS usage. Linux-only; returns
 /// `None` on other platforms or if the procfs read/parse fails.
 ///
 /// `cpu_ticks` is the sum of utime + stime from `/proc/self/stat`, in kernel
-/// clock ticks (USER_HZ, conventionally 100 per second on Linux). Compare
-/// successive samples over a known wall-time interval to get CPU fraction.
+/// clock ticks. Compare successive samples over a known wall-time interval to
+/// get CPU fraction using sysconf(_SC_CLK_TCK) to get the actual ticks/second.
 ///
 /// `rss_kb` is `VmRSS` from `/proc/self/status` (resident memory in kB).
 #[cfg(target_os = "linux")]
@@ -85,6 +104,7 @@ pub async fn run_reporter(cfg: ReporterConfig<'_>) {
     interval.tick().await;
     let has_actions = actions_per_sec > 0.0;
     let has_reads = read_rate > 0.0;
+    let clock_ticks_per_sec = get_clock_ticks_per_second();
     let mut total_oks: u64 = 0;
     let mut total_errs: u64 = 0;
     let mut total_calls: u64 = 0;
@@ -129,12 +149,15 @@ pub async fn run_reporter(cfg: ReporterConfig<'_>) {
 
         // Driver CPU/RSS sample. Linux-only procfs read; on other platforms
         // `sample_proc()` returns None and we just skip the driver columns.
-        // USER_HZ is conventionally 100 on Linux, so a 1s delta of N ticks ≈
-        // N% of one core. At 800% we're saturating 8 cores.
+        // Convert delta ticks to CPU% using the actual clock_ticks_per_sec.
+        // At 800% we're saturating 8 cores.
         let (drv_cpu_pct, drv_rss_mb) = match sample_proc() {
             Some((cpu_ticks, rss_kb)) => {
                 let cpu_pct = match prev_cpu_ticks {
-                    Some(prev) => cpu_ticks.saturating_sub(prev) as f64,
+                    Some(prev) => {
+                        let delta_ticks = cpu_ticks.saturating_sub(prev) as f64;
+                        (delta_ticks / clock_ticks_per_sec as f64) * 100.0
+                    }
                     None => 0.0,
                 };
                 prev_cpu_ticks = Some(cpu_ticks);
