@@ -93,6 +93,14 @@ dependencies = [
 [[package]]
 name = "arcane-swarm-orchestrator"
 version = "0.1.0"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.21.0",
+ "uuid",
+]
 
 [[package]]
 name = "arcane-wire"
