@@ -1,3 +1,7 @@
+pub mod protocol;
+pub mod driver_pool;
+pub mod server;
+
 #[cfg(test)]
 mod tests {
     mod dashboard_sse;
