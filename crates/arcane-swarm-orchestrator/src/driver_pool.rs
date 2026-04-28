@@ -115,3 +115,157 @@ impl DriverPool {
         self.drivers.read().await.get(&driver_id).map(|e| e.state)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn register_succeeds_when_pool_has_capacity() {
+        let pool = DriverPool::new(Duration::from_millis(50), Duration::from_millis(150), 10);
+
+        let capabilities = json!({"platform": "linux"});
+        let result = pool.register(capabilities).await;
+
+        assert!(result.is_ok());
+        assert_eq!(pool.len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn register_rejects_when_pool_at_capacity() {
+        let pool = DriverPool::new(Duration::from_millis(50), Duration::from_millis(150), 2);
+
+        let _cap1 = pool.register(json!({"platform": "linux"})).await.unwrap();
+        let _cap2 = pool.register(json!({"platform": "windows"})).await.unwrap();
+
+        assert_eq!(pool.len().await, 2);
+
+        let result = pool.register(json!({"platform": "darwin"})).await;
+
+        assert!(result.is_err());
+        assert_eq!(pool.len().await, 2);
+    }
+
+    #[tokio::test]
+    async fn register_with_same_driver_id_replaces_entry() {
+        let pool = DriverPool::new(Duration::from_millis(50), Duration::from_millis(150), 10);
+
+        let cap1 = pool
+            .register(json!({"platform": "linux", "v": 1}))
+            .await
+            .unwrap();
+        let initial_len = pool.len().await;
+
+        let cap2 = pool
+            .register(json!({"platform": "linux", "v": 2}))
+            .await
+            .unwrap();
+        let final_len = pool.len().await;
+
+        assert!(cap1 != cap2);
+        assert_eq!(initial_len, 1);
+        assert_eq!(final_len, 2);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_updates_timestamp_and_state() {
+        let pool = DriverPool::new(Duration::from_millis(50), Duration::from_millis(150), 10);
+
+        let driver_id = pool.register(json!({"platform": "linux"})).await.unwrap();
+        let result = pool.heartbeat(driver_id).await;
+
+        assert!(result.is_ok());
+        assert_eq!(pool.get_state(driver_id).await, Some(DriverState::Active));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_for_unknown_driver_returns_error() {
+        let pool = DriverPool::new(Duration::from_millis(50), Duration::from_millis(150), 10);
+        let unknown_id = DriverId::new_v4();
+
+        let result = pool.heartbeat(unknown_id).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn deregister_removes_entry() {
+        let pool = DriverPool::new(Duration::from_millis(50), Duration::from_millis(150), 10);
+
+        let driver_id = pool.register(json!({"platform": "linux"})).await.unwrap();
+        assert_eq!(pool.len().await, 1);
+        assert!(pool.contains(driver_id).await);
+
+        let result = pool.deregister(driver_id).await;
+
+        assert!(result.is_ok());
+        assert_eq!(pool.len().await, 0);
+        assert!(!pool.contains(driver_id).await);
+    }
+
+    #[tokio::test]
+    async fn deregister_for_unknown_driver_returns_error() {
+        let pool = DriverPool::new(Duration::from_millis(50), Duration::from_millis(150), 10);
+        let unknown_id = DriverId::new_v4();
+
+        let result = pool.deregister(unknown_id).await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn mark_stale_drivers_transitions_expired_to_stale() {
+        let pool = DriverPool::new(Duration::from_millis(50), Duration::from_millis(100), 10);
+
+        let driver_id = pool.register(json!({"platform": "linux"})).await.unwrap();
+        assert_eq!(pool.get_state(driver_id).await, Some(DriverState::Active));
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        pool.mark_stale_drivers().await;
+
+        assert_eq!(pool.get_state(driver_id).await, Some(DriverState::Stale));
+    }
+
+    #[tokio::test]
+    async fn mark_stale_drivers_leaves_recent_active() {
+        let pool = DriverPool::new(Duration::from_millis(50), Duration::from_millis(200), 10);
+
+        let driver_id = pool.register(json!({"platform": "linux"})).await.unwrap();
+        assert_eq!(pool.get_state(driver_id).await, Some(DriverState::Active));
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        pool.mark_stale_drivers().await;
+
+        assert_eq!(pool.get_state(driver_id).await, Some(DriverState::Active));
+    }
+
+    #[tokio::test]
+    async fn pool_is_empty_initially() {
+        let pool = DriverPool::new(Duration::from_millis(50), Duration::from_millis(150), 10);
+
+        assert!(pool.is_empty().await);
+        assert_eq!(pool.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn contains_returns_true_for_registered_driver() {
+        let pool = DriverPool::new(Duration::from_millis(50), Duration::from_millis(150), 10);
+
+        let driver_id = pool.register(json!({"platform": "linux"})).await.unwrap();
+
+        assert!(pool.contains(driver_id).await);
+    }
+
+    #[tokio::test]
+    async fn contains_returns_false_for_unknown_driver() {
+        let pool = DriverPool::new(Duration::from_millis(50), Duration::from_millis(150), 10);
+        let unknown_id = DriverId::new_v4();
+
+        assert!(!pool.contains(unknown_id).await);
+    }
+}
