@@ -1,0 +1,8 @@
+[package]
+name = "arcane-swarm-orchestrator"
+version = "0.1.0"
+edition = "2021"
+description = "Orchestrator for coordinating swarm benchmarks across distributed drivers."
+license = "AGPL-3.0-only"
+
+[dependencies]
