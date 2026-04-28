@@ -91,6 +91,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arcane-swarm-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "arcane-wire"
 version = "0.1.0"
 source = "git+https://github.com/brainy-bots/arcane.git?branch=main#1af872dc7c3b9fa5f70f5d7bddc842f719becd01"

@@ -1,5 +1,6 @@
 [workspace]
 members = [
   "crates/arcane-swarm",
+  "crates/arcane-swarm-orchestrator",
 ]
 resolver = "2"
