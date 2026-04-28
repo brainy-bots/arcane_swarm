@@ -1,11 +1,13 @@
 use crate::driver_pool::DriverPool;
-use crate::protocol::{DriverMessage, DeregisterRequest, HeartbeatRequest, RegisterRequest, OrchestratorResponse};
+use crate::protocol::{
+    DeregisterRequest, DriverMessage, HeartbeatRequest, OrchestratorResponse, RegisterRequest,
+};
+use futures::{SinkExt, StreamExt};
+use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use serde_json::json;
 use tokio_tungstenite::connect_async;
-use futures::{StreamExt, SinkExt};
 
 async fn start_test_server(
     heartbeat_interval: Duration,
@@ -38,11 +40,8 @@ async fn start_test_server(
 #[tokio::test]
 async fn registration_round_trip_succeeds() {
     // Acceptance: Registration round-trip succeeds; pool size grows.
-    let (pool, addr) = start_test_server(
-        Duration::from_millis(50),
-        Duration::from_millis(150),
-        100,
-    ).await;
+    let (pool, addr) =
+        start_test_server(Duration::from_millis(50), Duration::from_millis(150), 100).await;
 
     let ws_url = format!("ws://{}", addr);
     let (ws_stream, _) = connect_async(&ws_url).await.unwrap();
@@ -130,11 +129,8 @@ async fn heartbeat_keeps_driver_active() {
 #[tokio::test]
 async fn graceful_deregister_removes_driver() {
     // Acceptance: Graceful deregister removes driver immediately.
-    let (pool, addr) = start_test_server(
-        Duration::from_millis(50),
-        Duration::from_millis(150),
-        100,
-    ).await;
+    let (pool, addr) =
+        start_test_server(Duration::from_millis(50), Duration::from_millis(150), 100).await;
 
     let ws_url = format!("ws://{}", addr);
     let (ws_stream, _) = connect_async(&ws_url).await.unwrap();
@@ -175,11 +171,8 @@ async fn graceful_deregister_removes_driver() {
 #[tokio::test]
 async fn pool_cap_enforced() {
     // Acceptance: Pool cap enforced (orchestrator rejects registration past `--max-drivers`).
-    let (pool, addr) = start_test_server(
-        Duration::from_millis(50),
-        Duration::from_millis(150),
-        3,
-    ).await;
+    let (pool, addr) =
+        start_test_server(Duration::from_millis(50), Duration::from_millis(150), 3).await;
 
     let ws_url = format!("ws://{}", addr);
 

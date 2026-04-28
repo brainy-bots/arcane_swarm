@@ -42,10 +42,7 @@ impl DriverPool {
         }
     }
 
-    pub async fn register(
-        &self,
-        capabilities: Value,
-    ) -> Result<DriverId, String> {
+    pub async fn register(&self, capabilities: Value) -> Result<DriverId, String> {
         let mut drivers = self.drivers.write().await;
 
         if drivers.len() >= self.max_drivers {

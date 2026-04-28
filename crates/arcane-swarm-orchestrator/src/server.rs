@@ -1,11 +1,13 @@
 use crate::driver_pool::DriverPool;
-use crate::protocol::{DriverMessage, OrchestratorResponse, AckResponse, RegisterRejectedResponse, ErrorResponse};
+use crate::protocol::{
+    AckResponse, DriverMessage, ErrorResponse, OrchestratorResponse, RegisterRejectedResponse,
+};
+use futures::stream::StreamExt;
+use futures::SinkExt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::accept_async;
-use futures::stream::StreamExt;
-use futures::SinkExt;
 
 pub struct DriverServer {
     pool: Arc<DriverPool>,
@@ -53,36 +55,22 @@ pub async fn handle_connection(
 
         let text = msg.to_text()?;
         let response = match serde_json::from_str::<DriverMessage>(text) {
-            Ok(DriverMessage::Register(req)) => {
-                match pool.register(req.capabilities).await {
-                    Ok(driver_id) => {
-                        OrchestratorResponse::Ack(AckResponse {
-                            driver_id: Some(driver_id),
-                        })
-                    }
-                    Err(reason) => {
-                        OrchestratorResponse::RegisterRejected(RegisterRejectedResponse {
-                            reason,
-                        })
-                    }
+            Ok(DriverMessage::Register(req)) => match pool.register(req.capabilities).await {
+                Ok(driver_id) => OrchestratorResponse::Ack(AckResponse {
+                    driver_id: Some(driver_id),
+                }),
+                Err(reason) => {
+                    OrchestratorResponse::RegisterRejected(RegisterRejectedResponse { reason })
                 }
-            }
-            Ok(DriverMessage::Heartbeat(req)) => {
-                match pool.heartbeat(req.driver_id).await {
-                    Ok(_) => OrchestratorResponse::Ack(AckResponse { driver_id: None }),
-                    Err(err) => OrchestratorResponse::Error(ErrorResponse {
-                        message: err,
-                    }),
-                }
-            }
-            Ok(DriverMessage::Deregister(req)) => {
-                match pool.deregister(req.driver_id).await {
-                    Ok(_) => OrchestratorResponse::Ack(AckResponse { driver_id: None }),
-                    Err(err) => OrchestratorResponse::Error(ErrorResponse {
-                        message: err,
-                    }),
-                }
-            }
+            },
+            Ok(DriverMessage::Heartbeat(req)) => match pool.heartbeat(req.driver_id).await {
+                Ok(_) => OrchestratorResponse::Ack(AckResponse { driver_id: None }),
+                Err(err) => OrchestratorResponse::Error(ErrorResponse { message: err }),
+            },
+            Ok(DriverMessage::Deregister(req)) => match pool.deregister(req.driver_id).await {
+                Ok(_) => OrchestratorResponse::Ack(AckResponse { driver_id: None }),
+                Err(err) => OrchestratorResponse::Error(ErrorResponse { message: err }),
+            },
             Err(e) => OrchestratorResponse::Error(ErrorResponse {
                 message: format!("Invalid message: {}", e),
             }),
