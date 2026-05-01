@@ -55,3 +55,188 @@ pub struct RegisterRejectedResponse {
 pub struct ErrorResponse {
     pub message: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn register_request_json_round_trip() {
+        let original = DriverMessage::Register(RegisterRequest {
+            capabilities: json!({"platform": "linux", "cores": 8}),
+        });
+
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: DriverMessage = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&original).unwrap(),
+            serde_json::to_value(&deserialized).unwrap()
+        );
+    }
+
+    #[test]
+    fn heartbeat_request_json_round_trip() {
+        let driver_id = Uuid::new_v4();
+        let original = DriverMessage::Heartbeat(HeartbeatRequest { driver_id });
+
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: DriverMessage = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&original).unwrap(),
+            serde_json::to_value(&deserialized).unwrap()
+        );
+    }
+
+    #[test]
+    fn deregister_request_json_round_trip() {
+        let driver_id = Uuid::new_v4();
+        let original = DriverMessage::Deregister(DeregisterRequest { driver_id });
+
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: DriverMessage = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&original).unwrap(),
+            serde_json::to_value(&deserialized).unwrap()
+        );
+    }
+
+    #[test]
+    fn ack_response_json_round_trip() {
+        let driver_id = Some(Uuid::new_v4());
+        let original = OrchestratorResponse::Ack(AckResponse { driver_id });
+
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: OrchestratorResponse = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&original).unwrap(),
+            serde_json::to_value(&deserialized).unwrap()
+        );
+    }
+
+    #[test]
+    fn register_rejected_response_json_round_trip() {
+        let original = OrchestratorResponse::RegisterRejected(RegisterRejectedResponse {
+            reason: "Pool at capacity".to_string(),
+        });
+
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: OrchestratorResponse = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&original).unwrap(),
+            serde_json::to_value(&deserialized).unwrap()
+        );
+    }
+
+    #[test]
+    fn error_response_json_round_trip() {
+        let original = OrchestratorResponse::Error(ErrorResponse {
+            message: "Driver not found".to_string(),
+        });
+
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: OrchestratorResponse = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&original).unwrap(),
+            serde_json::to_value(&deserialized).unwrap()
+        );
+    }
+
+    #[test]
+    fn register_message_tag_deserialization() {
+        let json = r#"{"type":"register","capabilities":{"platform":"linux"}}"#;
+        let msg: DriverMessage = serde_json::from_str(json).unwrap();
+
+        match msg {
+            DriverMessage::Register(_) => (),
+            _ => panic!("Expected Register variant"),
+        }
+    }
+
+    #[test]
+    fn heartbeat_message_tag_deserialization() {
+        let driver_id = Uuid::new_v4();
+        let json = format!(r#"{{"type":"heartbeat","driver_id":"{}"}}"#, driver_id);
+        let msg: DriverMessage = serde_json::from_str(&json).unwrap();
+
+        match msg {
+            DriverMessage::Heartbeat(_) => (),
+            _ => panic!("Expected Heartbeat variant"),
+        }
+    }
+
+    #[test]
+    fn deregister_message_tag_deserialization() {
+        let driver_id = Uuid::new_v4();
+        let json = format!(r#"{{"type":"deregister","driver_id":"{}"}}"#, driver_id);
+        let msg: DriverMessage = serde_json::from_str(&json).unwrap();
+
+        match msg {
+            DriverMessage::Deregister(_) => (),
+            _ => panic!("Expected Deregister variant"),
+        }
+    }
+
+    #[test]
+    fn ack_response_tag_deserialization() {
+        let json = r#"{"type":"ack","driver_id":null}"#;
+        let response: OrchestratorResponse = serde_json::from_str(json).unwrap();
+
+        match response {
+            OrchestratorResponse::Ack(_) => (),
+            _ => panic!("Expected Ack variant"),
+        }
+    }
+
+    #[test]
+    fn register_rejected_response_tag_deserialization() {
+        let json = r#"{"type":"register_rejected","reason":"Pool full"}"#;
+        let response: OrchestratorResponse = serde_json::from_str(json).unwrap();
+
+        match response {
+            OrchestratorResponse::RegisterRejected(_) => (),
+            _ => panic!("Expected RegisterRejected variant"),
+        }
+    }
+
+    #[test]
+    fn error_response_tag_deserialization() {
+        let json = r#"{"type":"error","message":"Internal error"}"#;
+        let response: OrchestratorResponse = serde_json::from_str(json).unwrap();
+
+        match response {
+            OrchestratorResponse::Error(_) => (),
+            _ => panic!("Expected Error variant"),
+        }
+    }
+
+    #[test]
+    fn malformed_driver_message_returns_err() {
+        let malformed = r#"{"type":"invalid","data":123}"#;
+        let result: Result<DriverMessage, _> = serde_json::from_str(malformed);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn malformed_orchestrator_response_returns_err() {
+        let malformed = r#"{"type":"unknown","value":"test"}"#;
+        let result: Result<OrchestratorResponse, _> = serde_json::from_str(malformed);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_json_returns_err() {
+        let invalid = r#"not valid json at all"#;
+        let result: Result<DriverMessage, _> = serde_json::from_str(invalid);
+
+        assert!(result.is_err());
+    }
+}

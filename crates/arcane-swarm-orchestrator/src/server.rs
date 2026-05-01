@@ -35,6 +35,30 @@ impl DriverServer {
     }
 }
 
+pub(crate) async fn handle_message(
+    pool: &Arc<DriverPool>,
+    msg: DriverMessage,
+) -> OrchestratorResponse {
+    match msg {
+        DriverMessage::Register(req) => match pool.register(req.capabilities).await {
+            Ok(driver_id) => OrchestratorResponse::Ack(AckResponse {
+                driver_id: Some(driver_id),
+            }),
+            Err(reason) => {
+                OrchestratorResponse::RegisterRejected(RegisterRejectedResponse { reason })
+            }
+        },
+        DriverMessage::Heartbeat(req) => match pool.heartbeat(req.driver_id).await {
+            Ok(_) => OrchestratorResponse::Ack(AckResponse { driver_id: None }),
+            Err(err) => OrchestratorResponse::Error(ErrorResponse { message: err }),
+        },
+        DriverMessage::Deregister(req) => match pool.deregister(req.driver_id).await {
+            Ok(_) => OrchestratorResponse::Ack(AckResponse { driver_id: None }),
+            Err(err) => OrchestratorResponse::Error(ErrorResponse { message: err }),
+        },
+    }
+}
+
 pub async fn handle_connection(
     stream: TcpStream,
     pool: Arc<DriverPool>,
@@ -55,22 +79,7 @@ pub async fn handle_connection(
 
         let text = msg.to_text()?;
         let response = match serde_json::from_str::<DriverMessage>(text) {
-            Ok(DriverMessage::Register(req)) => match pool.register(req.capabilities).await {
-                Ok(driver_id) => OrchestratorResponse::Ack(AckResponse {
-                    driver_id: Some(driver_id),
-                }),
-                Err(reason) => {
-                    OrchestratorResponse::RegisterRejected(RegisterRejectedResponse { reason })
-                }
-            },
-            Ok(DriverMessage::Heartbeat(req)) => match pool.heartbeat(req.driver_id).await {
-                Ok(_) => OrchestratorResponse::Ack(AckResponse { driver_id: None }),
-                Err(err) => OrchestratorResponse::Error(ErrorResponse { message: err }),
-            },
-            Ok(DriverMessage::Deregister(req)) => match pool.deregister(req.driver_id).await {
-                Ok(_) => OrchestratorResponse::Ack(AckResponse { driver_id: None }),
-                Err(err) => OrchestratorResponse::Error(ErrorResponse { message: err }),
-            },
+            Ok(msg) => handle_message(&pool, msg).await,
             Err(e) => OrchestratorResponse::Error(ErrorResponse {
                 message: format!("Invalid message: {}", e),
             }),
@@ -83,4 +92,146 @@ pub async fn handle_connection(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn handle_message_register_succeeds() {
+        let pool = Arc::new(DriverPool::new(
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(150),
+            100,
+        ));
+
+        let msg = DriverMessage::Register(crate::protocol::RegisterRequest {
+            capabilities: json!({"platform": "linux"}),
+        });
+
+        let response = handle_message(&pool, msg).await;
+
+        match response {
+            OrchestratorResponse::Ack(ack) => {
+                assert!(ack.driver_id.is_some());
+            }
+            _ => panic!("Expected Ack response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_message_register_rejected_when_full() {
+        let pool = Arc::new(DriverPool::new(
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(150),
+            1,
+        ));
+
+        pool.register(json!({"platform": "linux"})).await.unwrap();
+
+        let msg = DriverMessage::Register(crate::protocol::RegisterRequest {
+            capabilities: json!({"platform": "windows"}),
+        });
+
+        let response = handle_message(&pool, msg).await;
+
+        match response {
+            OrchestratorResponse::RegisterRejected(_) => (),
+            _ => panic!("Expected RegisterRejected response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_message_heartbeat_succeeds() {
+        let pool = Arc::new(DriverPool::new(
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(150),
+            100,
+        ));
+
+        let driver_id = pool.register(json!({"platform": "linux"})).await.unwrap();
+
+        let msg = DriverMessage::Heartbeat(crate::protocol::HeartbeatRequest { driver_id });
+
+        let response = handle_message(&pool, msg).await;
+
+        match response {
+            OrchestratorResponse::Ack(ack) => {
+                assert_eq!(ack.driver_id, None);
+            }
+            _ => panic!("Expected Ack response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_message_heartbeat_unknown_driver_errors() {
+        let pool = Arc::new(DriverPool::new(
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(150),
+            100,
+        ));
+
+        let unknown_id = uuid::Uuid::new_v4();
+
+        let msg = DriverMessage::Heartbeat(crate::protocol::HeartbeatRequest {
+            driver_id: unknown_id,
+        });
+
+        let response = handle_message(&pool, msg).await;
+
+        match response {
+            OrchestratorResponse::Error(err) => {
+                assert!(err.message.contains("not found"));
+            }
+            _ => panic!("Expected Error response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_message_deregister_succeeds() {
+        let pool = Arc::new(DriverPool::new(
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(150),
+            100,
+        ));
+
+        let driver_id = pool.register(json!({"platform": "linux"})).await.unwrap();
+
+        let msg = DriverMessage::Deregister(crate::protocol::DeregisterRequest { driver_id });
+
+        let response = handle_message(&pool, msg).await;
+
+        match response {
+            OrchestratorResponse::Ack(ack) => {
+                assert_eq!(ack.driver_id, None);
+            }
+            _ => panic!("Expected Ack response"),
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_message_deregister_unknown_driver_errors() {
+        let pool = Arc::new(DriverPool::new(
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(150),
+            100,
+        ));
+
+        let unknown_id = uuid::Uuid::new_v4();
+
+        let msg = DriverMessage::Deregister(crate::protocol::DeregisterRequest {
+            driver_id: unknown_id,
+        });
+
+        let response = handle_message(&pool, msg).await;
+
+        match response {
+            OrchestratorResponse::Error(err) => {
+                assert!(err.message.contains("not found"));
+            }
+            _ => panic!("Expected Error response"),
+        }
+    }
 }
