@@ -1,8 +1,10 @@
 //! Real-time validity gate — orchestrator component C4.
 //!
-//! Per-tier acceptance criteria evaluated every 5 seconds during a tier;
-//! if a gate fails for ≥3 consecutive evaluations during steady-state, the
-//! tier is marked `FAIL` and the ramp aborts.
+//! Per-tier acceptance criteria evaluated every 2 seconds during a tier
+//! (cadence aligned with the C3 stats collector — there's no need to evaluate
+//! less often than we sample). If a gate fails for ≥3 consecutive evaluations
+//! during steady-state, the tier is marked `FAIL` and the ramp aborts within
+//! ~6s of the breach onset (3 × 2s).
 //!
 //! The gate is pure logic — no I/O — so tests inject scripted evaluation
 //! samples directly.
