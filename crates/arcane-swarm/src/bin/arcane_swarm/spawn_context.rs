@@ -41,7 +41,7 @@ pub(crate) struct ControlSpawnKit<'a> {
     pub handles: &'a mut Vec<Option<tokio::task::JoinHandle<()>>>,
     pub player_stop_flags: &'a Arc<Vec<Arc<AtomicBool>>>,
     pub loop_shared: &'a PlayerLoopShared,
-    pub backend_runtime: &'a Arc<dyn crate::BackendRuntime>,
+    pub backend_runtime: &'a Arc<dyn crate::runtime::BackendRuntime>,
     pub tick_interval: Duration,
     pub read_rate: f64,
 }
