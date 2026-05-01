@@ -56,6 +56,47 @@ pub struct ErrorResponse {
     pub message: String,
 }
 
+// -----------------------------------------------------------------------------
+// Orchestrator → driver commands (used by the tier ramp coordinator, C2).
+// -----------------------------------------------------------------------------
+
+/// Command pushed from the orchestrator to a registered driver. The driver
+/// applies the command and acknowledges via `CommandAck` back-message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum OrchestratorCommand {
+    /// Set the steady-state player count on the driver.
+    #[serde(rename = "set_players")]
+    SetPlayers(SetPlayersCommand),
+    /// Mark the start of a tier (player_count + hold duration).
+    #[serde(rename = "start_tier")]
+    StartTier(StartTierCommand),
+    /// Mark the end of the current tier (driver flushes per-tier metrics).
+    #[serde(rename = "end_tier")]
+    EndTier,
+    /// Abort the current run cleanly.
+    #[serde(rename = "abort")]
+    Abort,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetPlayersCommand {
+    pub player_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StartTierCommand {
+    pub tier_index: u32,
+    pub player_count: u32,
+    pub hold_seconds: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandAck {
+    pub driver_id: DriverId,
+    pub command_seq: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

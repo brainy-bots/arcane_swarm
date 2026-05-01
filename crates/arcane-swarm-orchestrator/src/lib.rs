@@ -1,6 +1,9 @@
 pub mod driver_pool;
 pub mod protocol;
 pub mod server;
+pub mod stats_collector;
+pub mod tier_ramp_coordinator;
+pub mod validity_gate;
 
 #[cfg(test)]
 mod tests {
