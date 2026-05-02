@@ -78,6 +78,7 @@ dependencies = [
 name = "arcane-swarm"
 version = "0.1.0"
 dependencies = [
+ "arcane-swarm-orchestrator",
  "arcane-wire",
  "futures-util",
  "libc",

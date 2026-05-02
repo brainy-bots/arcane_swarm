@@ -19,6 +19,7 @@ pub mod config;
 pub mod delta_cache;
 pub mod engine_api;
 pub mod metrics;
+pub mod orchestrated_mode;
 pub mod orchestration;
 pub mod player;
 pub mod protocol;

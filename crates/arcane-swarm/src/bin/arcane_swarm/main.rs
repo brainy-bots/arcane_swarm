@@ -32,6 +32,8 @@ mod backends_spacetimedb;
 mod spacetimedb_bindings;
 mod spawn_context;
 
+use arcane_swarm::orchestrated_mode;
+
 use spawn_context::{
     spawn_control_mode_player, ControlSpawnKit, PlayerLoopShared, PlayerSpawnParams,
 };
@@ -601,6 +603,14 @@ async fn main() {
         }
     };
     let backend_name = backend_runtime.name();
+
+    if cfg.orchestrator_url.is_some() {
+        if let Err(e) = orchestrated_mode::run_orchestrated_mode(cfg).await {
+            eprintln!("arcane-swarm(orchestrated): {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
 
     if cfg.run_forever || cfg.control_port > 0 {
         run_control_mode(cfg, tick_interval).await;
