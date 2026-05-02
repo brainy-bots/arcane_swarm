@@ -5,6 +5,7 @@ pub mod server;
 pub mod sse_server;
 pub mod stats_collector;
 pub mod telemetry;
+pub mod telemetry_archive;
 
 #[cfg(test)]
 mod tests {
