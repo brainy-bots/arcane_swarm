@@ -11,6 +11,7 @@ pub mod ws_driver_channel;
 #[cfg(test)]
 mod tests {
     mod command_dispatch;
+    mod controller_submit_e2e;
     mod dashboard_sse;
     mod driver_registration;
     mod stats_collector;
