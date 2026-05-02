@@ -1,10 +1,4 @@
 //! Acceptance tests for the cluster /stats collector (C3).
-//!
-//! Tests are gated with `#[ignore]` until the implementation in
-//! `src/stats_collector.rs` lands. To run them locally:
-//!
-//!   cargo test -p arcane-swarm-orchestrator -- --ignored
-//!
 //! The tests are the spec.
 
 use crate::stats_collector::{ClusterEndpoint, ClusterStats, StatsCollector};
@@ -77,7 +71,7 @@ fn stats_at(now: Instant, bytes_out: u64, entities: u64) -> ClusterStats {
 }
 
 #[tokio::test]
-#[ignore]
+
 async fn collector_reports_correct_rates_and_counters() {
     // Acceptance: Mock cluster server emits known stats; collector reports
     // correct rates and counters.
@@ -123,7 +117,7 @@ async fn collector_reports_correct_rates_and_counters() {
 }
 
 #[tokio::test]
-#[ignore]
+
 async fn polling_continues_when_cluster_unreachable() {
     // Acceptance: Polling continues when one cluster is briefly unreachable;
     // resumes on recovery.
@@ -168,7 +162,7 @@ async fn polling_continues_when_cluster_unreachable() {
 }
 
 #[tokio::test]
-#[ignore]
+
 async fn time_series_memory_bounded() {
     // Acceptance: Time-series memory bounded to 5 minutes (no unbounded
     // growth over a 24-hour soak).
