@@ -36,147 +36,8 @@ use spawn_context::{
     spawn_control_mode_player, ControlSpawnKit, PlayerLoopShared, PlayerSpawnParams,
 };
 
-/// Backend-specific runtime selected at startup (`spacetimedb` vs `arcane`). Binary-internal only; CLI and wire formats are unchanged.
-///
-/// Both backends carry movement and action reducer calls on one WebSocket per
-/// simulated player, so `spawn_player` owns the entire per-player lifecycle
-/// (connect, movement loop, action loop, disconnect). There is no separate
-/// action spawn.
-pub(crate) trait BackendRuntime: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn spawn_player(
-        &self,
-        shared: &PlayerLoopShared,
-        params: PlayerSpawnParams,
-    ) -> tokio::task::JoinHandle<()>;
-
-    fn spawn_read(
-        &self,
-        shared: &PlayerLoopShared,
-        params: &PlayerSpawnParams,
-        read_rate: f64,
-    ) -> Option<tokio::task::JoinHandle<()>>;
-
-    /// Snapshot+reset cache hit/miss counters if this backend has a per-frame
-    /// decode cache. Default returns `(0, 0)` so backends without one (e.g.
-    /// SpacetimeDB) report zero in the FINAL line without special-casing.
-    fn snapshot_cache_counters(&self) -> (u64, u64) {
-        (0, 0)
-    }
-}
-
-struct SpacetimeRuntime {
-    /// Connection params handed to every player loop so it opens its own
-    /// dedicated WebSocket. Multiplexing all players over one socket hit
-    /// SpacetimeDB's per-client `incoming_queue_length` limit under load and
-    /// silently dropped messages — see backends_spacetimedb.rs top-of-file.
-    connect_params: backends_spacetimedb::SpacetimeConnectParams,
-    server_physics: bool,
-}
-
-impl BackendRuntime for SpacetimeRuntime {
-    fn name(&self) -> &'static str {
-        "spacetimedb"
-    }
-
-    fn spawn_player(
-        &self,
-        shared: &PlayerLoopShared,
-        params: PlayerSpawnParams,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(backends_spacetimedb::player_loop_spacetimedb(
-            backends_spacetimedb::SpacetimePlayerLoop {
-                connect_params: self.connect_params.clone(),
-                idx: params.idx,
-                entity_id: params.entity_id,
-                total: params.desired_total,
-                tick_interval: params.tick_interval,
-                metrics: shared.metrics.clone(),
-                read_metrics: shared.read_metrics.clone(),
-                action_metrics: shared.action_metrics.clone(),
-                stop: params.stop,
-                cluster_flag: shared.cluster_flag.clone(),
-                server_physics: self.server_physics,
-                all_ids: shared.all_ids.clone(),
-                total_players: shared.total_players.clone(),
-                actions_per_sec: shared.actions_per_sec,
-                burst: shared.burst,
-                run_started: shared.run_started,
-            },
-        ))
-    }
-
-    fn spawn_read(
-        &self,
-        _shared: &PlayerLoopShared,
-        _params: &PlayerSpawnParams,
-        _read_rate: f64,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        // SpacetimeDB reads arrive as subscription updates via the SDK — the
-        // player loop registers an `on_update(Entity)` handler inline and
-        // counts inbound bytes there. No separate read task to spawn.
-        None
-    }
-}
-
-struct ArcaneRuntime {
-    endpoint: ArcaneEndpoint,
-    /// Per-driver shared decode cache. Populated lazily by drain tasks; see
-    /// `arcane_swarm::delta_cache` for why it exists. Lives on the runtime
-    /// (rather than `PlayerLoopShared`) because it's Arcane-specific —
-    /// SpacetimeDB backend has its own subscription pipeline.
-    delta_cache: Arc<arcane_swarm::DeltaCache>,
-    /// Bytes per `PlayerStatePayload.user_data` payload. Same reasoning as
-    /// `delta_cache` — Arcane-specific knob; SpacetimeDB backend has no
-    /// equivalent opaque-payload field on its movement frames.
-    user_data_bytes: usize,
-}
-
-impl BackendRuntime for ArcaneRuntime {
-    fn name(&self) -> &'static str {
-        "arcane"
-    }
-
-    fn spawn_player(
-        &self,
-        shared: &PlayerLoopShared,
-        params: PlayerSpawnParams,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(backends_arcane::player_loop_arcane(
-            backends_arcane::ArcanePlayerLoop {
-                endpoint: self.endpoint.clone(),
-                client: shared.http_client.clone(),
-                idx: params.idx,
-                entity_id: params.entity_id,
-                total: params.desired_total,
-                tick_interval: params.tick_interval,
-                metrics: shared.metrics.clone(),
-                read_metrics: shared.read_metrics.clone(),
-                action_metrics: shared.action_metrics.clone(),
-                stop: params.stop,
-                cluster_flag: shared.cluster_flag.clone(),
-                actions_per_sec: shared.actions_per_sec,
-                burst: shared.burst,
-                run_started: shared.run_started,
-                delta_cache: self.delta_cache.clone(),
-                user_data_bytes: self.user_data_bytes,
-            },
-        ))
-    }
-
-    fn spawn_read(
-        &self,
-        _shared: &PlayerLoopShared,
-        _params: &PlayerSpawnParams,
-        _read_rate: f64,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        None
-    }
-
-    fn snapshot_cache_counters(&self) -> (u64, u64) {
-        self.delta_cache.snapshot_and_reset_counters()
-    }
-}
+mod runtime;
+pub(crate) use runtime::BackendRuntime;
 
 async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     let run_started = std::time::Instant::now();
@@ -191,7 +52,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
     let read_metrics = Arc::new(Metrics::new());
 
     let backend_runtime: Arc<dyn BackendRuntime> = match cfg.backend {
-        Backend::SpacetimeDb => Arc::new(SpacetimeRuntime {
+        Backend::SpacetimeDb => Arc::new(runtime::SpacetimeRuntime {
             connect_params: backends_spacetimedb::SpacetimeConnectParams {
                 ws_uri: ws_uri.clone(),
                 database_name: cfg.database.clone(),
@@ -205,7 +66,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                 },
                 None => ArcaneEndpoint::SingleUrl(cfg.arcane_ws.clone()),
             };
-            Arc::new(ArcaneRuntime {
+            Arc::new(runtime::ArcaneRuntime {
                 endpoint,
                 delta_cache: Arc::new(arcane_swarm::DeltaCache::default()),
                 user_data_bytes: cfg.user_data_bytes,
@@ -322,6 +183,19 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         run_started,
     };
 
+    let handles_shared = runtime::SharedHandles {
+        http_client: http_client.clone(),
+        metrics: metrics.clone(),
+        read_metrics: read_metrics.clone(),
+        action_metrics: action_metrics.clone(),
+        cluster_flag: cluster_flag.clone(),
+        all_ids: all_ids.clone(),
+        total_players: total_players_atomic.clone(),
+        actions_per_sec: cfg.actions_per_sec,
+        burst: cfg.burst,
+        run_started,
+    };
+
     // Spawn initial players (and their optional read task — actions share the
     // movement WebSocket and are driven from inside the player loop).
     let initial = desired_players.load(Ordering::Relaxed) as usize;
@@ -338,6 +212,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
             handles: &mut handles,
             player_stop_flags: &player_stop_flags,
             loop_shared: &loop_shared,
+            handles_shared: &handles_shared,
             backend_runtime: &backend_runtime,
             tick_interval,
             read_rate: cfg.read_rate,
@@ -409,6 +284,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
                     handles: &mut handles,
                     player_stop_flags: &player_stop_flags,
                     loop_shared: &loop_shared,
+                    handles_shared: &handles_shared,
                     backend_runtime: &backend_runtime,
                     tick_interval,
                     read_rate: cfg.read_rate,
@@ -579,7 +455,7 @@ async fn main() {
     let read_metrics = Arc::new(Metrics::new());
 
     let backend_runtime: Arc<dyn BackendRuntime> = match cfg.backend {
-        Backend::SpacetimeDb => Arc::new(SpacetimeRuntime {
+        Backend::SpacetimeDb => Arc::new(runtime::SpacetimeRuntime {
             connect_params: backends_spacetimedb::SpacetimeConnectParams {
                 ws_uri: ws_uri.clone(),
                 database_name: cfg.database.clone(),
@@ -593,7 +469,7 @@ async fn main() {
                 },
                 None => ArcaneEndpoint::SingleUrl(cfg.arcane_ws.clone()),
             };
-            Arc::new(ArcaneRuntime {
+            Arc::new(runtime::ArcaneRuntime {
                 endpoint,
                 delta_cache: Arc::new(arcane_swarm::DeltaCache::default()),
                 user_data_bytes: cfg.user_data_bytes,
@@ -668,6 +544,19 @@ async fn main() {
         run_started,
     };
 
+    let handles_shared = runtime::SharedHandles {
+        http_client: http_client.clone(),
+        metrics: metrics.clone(),
+        read_metrics: read_metrics.clone(),
+        action_metrics: action_metrics.clone(),
+        cluster_flag: cfg.cluster_command.clone(),
+        all_ids: all_ids.clone(),
+        total_players: total_players_atomic.clone(),
+        actions_per_sec: cfg.actions_per_sec,
+        burst: cfg.burst,
+        run_started,
+    };
+
     for i in 0..cfg.players {
         let params = PlayerSpawnParams {
             idx: i,
@@ -676,7 +565,7 @@ async fn main() {
             tick_interval,
             stop: stop.clone(),
         };
-        handles.push(backend_runtime.spawn_player(&loop_shared, params.clone()));
+        handles.push(backend_runtime.spawn_player(&handles_shared, params.clone()));
         let _ = backend_runtime.spawn_read(&loop_shared, &params, cfg.read_rate);
     }
 

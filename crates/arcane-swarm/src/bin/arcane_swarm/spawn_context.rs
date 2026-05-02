@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use arcane_swarm::{BurstConfig, Metrics};
 
+use crate::runtime::SharedHandles;
+
 /// HTTP client, metric sinks, and flags shared by every player loop on a run.
 ///
 /// Action-loop config (rate, metrics, target pool) lives here too because both
@@ -41,6 +43,7 @@ pub(crate) struct ControlSpawnKit<'a> {
     pub handles: &'a mut Vec<Option<tokio::task::JoinHandle<()>>>,
     pub player_stop_flags: &'a Arc<Vec<Arc<AtomicBool>>>,
     pub loop_shared: &'a PlayerLoopShared,
+    pub handles_shared: &'a SharedHandles,
     pub backend_runtime: &'a Arc<dyn crate::BackendRuntime>,
     pub tick_interval: Duration,
     pub read_rate: f64,
@@ -62,7 +65,7 @@ pub(crate) fn spawn_control_mode_player(
     };
     kit.handles[idx] = Some(
         kit.backend_runtime
-            .spawn_player(kit.loop_shared, params.clone()),
+            .spawn_player(kit.handles_shared, params.clone()),
     );
     let _ = kit
         .backend_runtime
