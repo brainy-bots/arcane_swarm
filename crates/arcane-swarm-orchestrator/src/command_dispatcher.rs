@@ -62,8 +62,13 @@ pub enum DispatchError {
 ///
 /// Tests: backed by `MockDriverChannel` (in `tests/command_dispatch.rs`).
 pub trait DriverChannel: Send + Sync {
+    /// Push one command (with its dispatcher-assigned `seq`) to the driver
+    /// and resolve to its `CommandAck` (carrying the same `seq`) when it
+    /// arrives. Production wires this to a per-connection mpsc + oneshot
+    /// pair driven by the WS server.
     fn send(
         &self,
+        seq: u64,
         command: OrchestratorCommand,
     ) -> impl Future<Output = Result<CommandAck, String>> + Send;
 }
@@ -142,7 +147,7 @@ impl<C: DriverChannel + 'static> CommandDispatcher<C> {
             let cmd = command.clone();
             let tx = tx.clone();
             tokio::spawn(async move {
-                let result = ch.send(cmd).await;
+                let result = ch.send(seq, cmd).await;
                 let _ = tx.send((driver_id, result)).await;
             });
         }
