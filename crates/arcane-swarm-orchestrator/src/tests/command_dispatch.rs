@@ -113,11 +113,25 @@ async fn set_players_broadcasts_to_all_active_drivers_within_100ms() {
     );
     assert_eq!(result.acks.len(), 12, "all 12 drivers should ack");
     assert!(result.missing.is_empty(), "no driver should be missing");
+    // Per-driver distribution: 125 / 12 = 10 base, rem = 5; first 5 drivers
+    // get 11, rest get 10. Sum = 5*11 + 7*10 = 125.
+    let mut counts: Vec<u32> = Vec::new();
     for ch in channels.values() {
         let sent = ch.sent_commands().await;
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0], cmd);
+        if let OrchestratorCommand::SetPlayers(s) = &sent[0] {
+            counts.push(s.player_count);
+        } else {
+            panic!("expected SetPlayers; got {:?}", sent[0]);
+        }
     }
+    counts.sort();
+    assert_eq!(
+        counts.iter().sum::<u32>(),
+        125,
+        "per-driver counts sum to aggregate"
+    );
+    let _ = cmd;
 }
 
 #[tokio::test]
@@ -279,6 +293,90 @@ async fn stop_command_is_broadcast_and_logged() {
     let log = dispatcher.command_log().await;
     assert_eq!(log.len(), 1);
     assert!(matches!(log[0].command, OrchestratorCommand::Stop));
+}
+
+#[tokio::test]
+async fn set_players_is_distributed_per_driver_evenly() {
+    // 4 drivers, target 100 → each driver gets 25.
+    let (dispatcher, _pool, channels) = fleet(4).await;
+    let _ = dispatcher
+        .submit(
+            "controller-a".to_string(),
+            OrchestratorCommand::SetPlayers(SetPlayersCommand { player_count: 100 }),
+        )
+        .await
+        .unwrap();
+    for ch in channels.values() {
+        let sent = ch.sent_commands().await;
+        assert_eq!(sent.len(), 1);
+        match &sent[0] {
+            OrchestratorCommand::SetPlayers(s) => assert_eq!(s.player_count, 25),
+            _ => panic!("expected SetPlayers"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn set_players_distributes_remainder_to_first_drivers() {
+    // 4 drivers, target 102 → first 2 get 26, last 2 get 25 (sum = 102).
+    let (dispatcher, _pool, channels) = fleet(4).await;
+    let _ = dispatcher
+        .submit(
+            "controller-a".to_string(),
+            OrchestratorCommand::SetPlayers(SetPlayersCommand { player_count: 102 }),
+        )
+        .await
+        .unwrap();
+    let mut counts: Vec<u32> = Vec::new();
+    for ch in channels.values() {
+        let sent = ch.sent_commands().await;
+        if let OrchestratorCommand::SetPlayers(s) = &sent[0] {
+            counts.push(s.player_count);
+        }
+    }
+    counts.sort();
+    assert_eq!(counts, vec![25, 25, 26, 26]);
+    assert_eq!(counts.iter().sum::<u32>(), 102);
+}
+
+#[tokio::test]
+async fn set_players_aggregate_13500_across_12_drivers_is_1125_each() {
+    // Headline scenario: 13,500 aggregate / 12 drivers = 1,125 each, exact.
+    let (dispatcher, _pool, channels) = fleet(12).await;
+    let _ = dispatcher
+        .submit(
+            "controller-a".to_string(),
+            OrchestratorCommand::SetPlayers(SetPlayersCommand {
+                player_count: 13_500,
+            }),
+        )
+        .await
+        .unwrap();
+    for ch in channels.values() {
+        let sent = ch.sent_commands().await;
+        if let OrchestratorCommand::SetPlayers(s) = &sent[0] {
+            assert_eq!(s.player_count, 1_125);
+        }
+    }
+}
+
+#[tokio::test]
+async fn set_spawn_delay_ms_remains_a_broadcast() {
+    // Non-SetPlayers commands go to every driver verbatim.
+    let (dispatcher, _pool, channels) = fleet(4).await;
+    let _ = dispatcher
+        .submit(
+            "controller-a".to_string(),
+            OrchestratorCommand::SetSpawnDelayMs(SetSpawnDelayMsCommand { spawn_delay_ms: 50 }),
+        )
+        .await
+        .unwrap();
+    for ch in channels.values() {
+        let sent = ch.sent_commands().await;
+        if let OrchestratorCommand::SetSpawnDelayMs(s) = &sent[0] {
+            assert_eq!(s.spawn_delay_ms, 50);
+        }
+    }
 }
 
 #[tokio::test]

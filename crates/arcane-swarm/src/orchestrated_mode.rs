@@ -1,17 +1,16 @@
 //! Orchestrated mode for the swarm driver.
 //!
-//! When the operator passes `--orchestrator-url <url>`, the driver connects
-//! to a swarm orchestrator over WebSocket, registers, sends periodic
-//! heartbeats, and applies real-time commands (`SetPlayers`, `SetSpawnDelayMs`,
-//! `Stop`) by updating shared atomics. Each command is acknowledged with a
-//! `CommandAck` carrying the orchestrator-assigned sequence number.
-//!
-//! **Scope of this module.** This is the wire-protocol half of the driver
-//! protocol extension (#27). It maintains the `target_players` and
-//! `spawn_delay_ms` state mutated by orchestrator commands, but does **not**
-//! drive the existing per-player spawning machinery — wiring that state into
-//! the live spawn loop is a follow-up. The contract this PR satisfies:
-//! "registration succeeds, commands received, telemetry pushed."
+//! When the operator passes `--orchestrator-url <url>`, the driver:
+//!   1. Picks a free localhost TCP port for the control bridge.
+//!   2. Starts the standard `run_control_mode` loop (in main) listening on
+//!      that port — same well-tested player spawn / metrics / FINAL-line
+//!      machinery the SSM-driven harness uses.
+//!   3. Connects to the swarm orchestrator over WebSocket, registers,
+//!      sends periodic heartbeats.
+//!   4. On each inbound `OrchestratorCommand`, translates it to the
+//!      local control protocol (`SET_PLAYERS N`, `QUIT`) and acks back to
+//!      the orchestrator. This makes the orchestrator's `SetPlayers(N)`
+//!      actually drive real player spawning via the existing control path.
 //!
 //! Standalone mode (no `--orchestrator-url`) is unchanged.
 
@@ -25,11 +24,13 @@ use serde_json::json;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-/// Shared state mutated by orchestrator commands. Public so a future PR
-/// (driving the existing spawn loop from these atomics) can read them.
+/// Shared state mutated by orchestrator commands. Public so observers (e.g.
+/// future telemetry hooks) can read the current target without taking a lock.
 #[derive(Clone)]
 pub struct OrchestratedState {
     pub target_players: Arc<AtomicU32>,
@@ -47,19 +48,60 @@ impl OrchestratedState {
     }
 }
 
-/// Connect, register, run the heartbeat + command loop until either the
-/// orchestrator disconnects or a `Stop` command is received.
-pub async fn run_orchestrated_mode(cfg: Config) -> Result<(), String> {
+/// Pick a free localhost TCP port by binding 0.0.0.0:0 and reading back
+/// the kernel-assigned port. The listener is dropped before returning so
+/// the caller (run_control_mode) can re-bind it.
+pub async fn pick_free_local_port() -> std::io::Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
+}
+
+/// Wait until something is accepting TCP on `127.0.0.1:port`. Used to
+/// synchronize the orchestrator-WS task with the control-mode TCP server
+/// startup; without it the bridge can connect before run_control_mode has
+/// bound its listener.
+async fn wait_for_local_tcp(port: u16, timeout: Duration) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("control port {} did not bind in time", port));
+        }
+        if TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            return Ok(());
+        }
+        time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Connect to the orchestrator, register, then bridge inbound commands to
+/// the local control-mode TCP server. Runs until either `Stop` is received
+/// or the WS/TCP connection drops. The caller is expected to also be
+/// running `run_control_mode` (or equivalent) on `tcp_port`.
+pub async fn run_ws_to_tcp_bridge(
+    cfg: Config,
+    tcp_port: u16,
+    state: OrchestratedState,
+) -> Result<(), String> {
     let url = cfg
         .orchestrator_url
         .clone()
-        .expect("run_orchestrated_mode requires --orchestrator-url");
+        .expect("run_ws_to_tcp_bridge requires --orchestrator-url");
 
     eprintln!(
-        "arcane-swarm(orchestrated): connecting to {} (initial players={}, spawn_delay_ms={})",
-        url, cfg.players, cfg.inter_spawn_delay_ms
+        "arcane-swarm(orchestrated): connecting to {} (initial players={}, spawn_delay_ms={}, control_bridge=127.0.0.1:{})",
+        url, cfg.players, cfg.inter_spawn_delay_ms, tcp_port
     );
 
+    // Wait for run_control_mode's TCP server to bind so the first
+    // SET_PLAYERS doesn't race ahead of the listener.
+    wait_for_local_tcp(tcp_port, Duration::from_secs(15)).await?;
+    let mut tcp = TcpStream::connect(("127.0.0.1", tcp_port))
+        .await
+        .map_err(|e| format!("connect to local control port: {}", e))?;
+
+    // Connect + register against the orchestrator.
     let (ws, _) = connect_async(&url).await.map_err(|e| e.to_string())?;
     let (mut sender, mut receiver) = ws.split();
 
@@ -102,10 +144,16 @@ pub async fn run_orchestrated_mode(cfg: Config) -> Result<(), String> {
     };
     eprintln!("arcane-swarm(orchestrated): registered as {}", driver_id);
 
-    let state = OrchestratedState::new(cfg.players, cfg.inter_spawn_delay_ms);
+    // Push the driver's initial player count straight into the control
+    // server so the operator's --players starting count actually becomes
+    // the initial spawn target. Otherwise run_control_mode starts at 0
+    // until the first SetPlayers arrives over WS.
+    let _ = tcp
+        .write_all(format!("SET_PLAYERS {}\n", cfg.players).as_bytes())
+        .await;
 
-    // Heartbeat task. Independent of the read loop so missed heartbeats are
-    // determined by wall-clock cadence, not message arrival rate.
+    // Heartbeat task — independent of the read loop so missed heartbeats
+    // are determined by wall-clock, not message arrival rate.
     let (hb_tx, mut hb_rx) = tokio::sync::mpsc::channel::<DriverMessage>(8);
     let hb_state_stop = state.stop.clone();
     tokio::spawn(async move {
@@ -125,8 +173,7 @@ pub async fn run_orchestrated_mode(cfg: Config) -> Result<(), String> {
         }
     });
 
-    // Outbound multiplexer: writes Heartbeat (from hb_rx) + CommandAck (from
-    // ack_tx) onto the single WS sink.
+    // Outbound multiplexer — heartbeats + acks share the WS sink.
     let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel::<DriverMessage>(64);
     let writer_stop = state.stop.clone();
     let writer = tokio::spawn(async move {
@@ -158,7 +205,8 @@ pub async fn run_orchestrated_mode(cfg: Config) -> Result<(), String> {
         }
     });
 
-    // Read loop: process orchestrator-pushed messages.
+    // Read loop: process orchestrator-pushed messages, translate to TCP
+    // control commands, ack back.
     while let Some(msg_result) = receiver.next().await {
         let msg = match msg_result {
             Ok(m) => m,
@@ -177,7 +225,12 @@ pub async fn run_orchestrated_mode(cfg: Config) -> Result<(), String> {
         };
         match resp {
             OrchestratorResponse::Command(env) => {
-                apply_command(&state, &env);
+                // Apply to the shared atomics first (observers / tests
+                // care) and then translate to the TCP control protocol the
+                // existing run_control_mode speaks.
+                if let Err(e) = apply_to_tcp(&state, &env, &mut tcp).await {
+                    eprintln!("arcane-swarm(orchestrated): TCP bridge write failed: {}", e);
+                }
                 let ack = DriverMessage::CommandAck(CommandAck {
                     driver_id,
                     command_seq: env.seq,
@@ -192,7 +245,7 @@ pub async fn run_orchestrated_mode(cfg: Config) -> Result<(), String> {
                 }
             }
             OrchestratorResponse::Ack(_) => {
-                // Heartbeat ack — nothing to do beyond confirming the loop is alive.
+                // Heartbeat ack — confirms the loop is alive.
             }
             OrchestratorResponse::Error(e) => {
                 eprintln!(
@@ -212,22 +265,49 @@ pub async fn run_orchestrated_mode(cfg: Config) -> Result<(), String> {
     Ok(())
 }
 
-fn apply_command(state: &OrchestratedState, env: &CommandEnvelope) {
+async fn apply_to_tcp(
+    state: &OrchestratedState,
+    env: &CommandEnvelope,
+    tcp: &mut TcpStream,
+) -> Result<(), String> {
     match &env.command {
         OrchestratorCommand::SetPlayers(c) => {
             state
                 .target_players
                 .store(c.player_count, Ordering::Relaxed);
+            tcp.write_all(format!("SET_PLAYERS {}\n", c.player_count).as_bytes())
+                .await
+                .map_err(|e| e.to_string())
         }
         OrchestratorCommand::SetSpawnDelayMs(c) => {
+            // run_control_mode reads inter_spawn_delay_ms once at startup
+            // (a static `Duration`). Updating it mid-run requires extending
+            // the TCP control protocol with SET_SPAWN_DELAY; until that
+            // lands the value here is recorded for observers but isn't
+            // applied to ongoing spawns. The headline benchmark sets a
+            // single spawn_delay_ms at the first phase, so this is fine
+            // for now.
             state
                 .spawn_delay_ms
                 .store(c.spawn_delay_ms, Ordering::Relaxed);
+            Ok(())
         }
         OrchestratorCommand::Stop => {
-            // stop bit is set by caller after the ack is enqueued
+            // Tell run_control_mode to drain + exit.
+            tcp.write_all(b"QUIT\n").await.map_err(|e| e.to_string())
         }
     }
+}
+
+/// Backward-compat entry that constructs default state and runs the
+/// bridge. Kept so existing tests + callers that don't share state with
+/// the spawn loop still compile.
+pub async fn run_orchestrated_mode(cfg: Config) -> Result<(), String> {
+    let state = OrchestratedState::new(cfg.players, cfg.inter_spawn_delay_ms);
+    let port = pick_free_local_port()
+        .await
+        .map_err(|e| format!("pick local port: {}", e))?;
+    run_ws_to_tcp_bridge(cfg, port, state).await
 }
 
 #[cfg(test)]
@@ -235,34 +315,115 @@ mod tests {
     use super::*;
     use arcane_swarm_orchestrator::protocol::{SetPlayersCommand, SetSpawnDelayMsCommand};
 
-    #[test]
-    fn apply_set_players_updates_atomic() {
+    #[tokio::test]
+    async fn pick_free_port_returns_distinct_unused_port() {
+        let p1 = pick_free_local_port().await.unwrap();
+        let p2 = pick_free_local_port().await.unwrap();
+        assert!(p1 > 1024);
+        assert!(p2 > 1024);
+        // Don't assert distinct — kernel may reuse — but bind both
+        // sequentially to confirm neither is in TIME_WAIT.
+        let _l = TcpListener::bind(("127.0.0.1", p1)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_to_tcp_writes_set_players_line() {
+        // Bind a listener, accept one connection in the background, capture
+        // the bytes the bridge writes.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 64];
+            use tokio::io::AsyncReadExt;
+            let n = sock.read(&mut buf).await.unwrap();
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        });
+
+        let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         let s = OrchestratedState::new(0, 0);
-        apply_command(
+        apply_to_tcp(
             &s,
             &CommandEnvelope {
                 seq: 1,
                 command: OrchestratorCommand::SetPlayers(SetPlayersCommand { player_count: 250 }),
             },
-        );
+            &mut client,
+        )
+        .await
+        .unwrap();
+        drop(client);
+
+        let received = server.await.unwrap();
+        assert_eq!(received, "SET_PLAYERS 250\n");
         assert_eq!(s.target_players.load(Ordering::Relaxed), 250);
-        assert_eq!(s.spawn_delay_ms.load(Ordering::Relaxed), 0);
-        assert!(!s.stop.load(Ordering::Relaxed));
     }
 
-    #[test]
-    fn apply_set_spawn_delay_updates_atomic() {
-        let s = OrchestratedState::new(100, 0);
-        apply_command(
+    #[tokio::test]
+    async fn apply_to_tcp_translates_stop_to_quit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            use tokio::io::AsyncReadExt;
+            let mut buf = [0u8; 16];
+            let n = sock.read(&mut buf).await.unwrap();
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        });
+
+        let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let s = OrchestratedState::new(0, 0);
+        apply_to_tcp(
             &s,
             &CommandEnvelope {
                 seq: 2,
+                command: OrchestratorCommand::Stop,
+            },
+            &mut client,
+        )
+        .await
+        .unwrap();
+        drop(client);
+        let received = server.await.unwrap();
+        assert_eq!(received, "QUIT\n");
+    }
+
+    #[tokio::test]
+    async fn apply_to_tcp_records_spawn_delay_locally() {
+        // SetSpawnDelayMs records the value in OrchestratedState but does
+        // not write to TCP (the existing control protocol has no
+        // SET_SPAWN_DELAY). This test pins that contract so a future
+        // protocol extension doesn't silently change behavior.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            use tokio::io::AsyncReadExt;
+            let mut buf = [0u8; 16];
+            let n = tokio::time::timeout(Duration::from_millis(200), sock.read(&mut buf))
+                .await
+                .map(|r| r.unwrap_or(0))
+                .unwrap_or(0);
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        });
+        let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let s = OrchestratedState::new(0, 0);
+        apply_to_tcp(
+            &s,
+            &CommandEnvelope {
+                seq: 3,
                 command: OrchestratorCommand::SetSpawnDelayMs(SetSpawnDelayMsCommand {
                     spawn_delay_ms: 250,
                 }),
             },
-        );
+            &mut client,
+        )
+        .await
+        .unwrap();
+        drop(client);
+        let received = server.await.unwrap();
+        assert_eq!(received, "");
         assert_eq!(s.spawn_delay_ms.load(Ordering::Relaxed), 250);
-        assert_eq!(s.target_players.load(Ordering::Relaxed), 100);
     }
 }

@@ -605,10 +605,37 @@ async fn main() {
     let backend_name = backend_runtime.name();
 
     if cfg.orchestrator_url.is_some() {
-        if let Err(e) = orchestrated_mode::run_orchestrated_mode(cfg).await {
-            eprintln!("arcane-swarm(orchestrated): {}", e);
-            std::process::exit(1);
-        }
+        // Orchestrated mode: pick a free localhost port for the control
+        // bridge, run the standard control-mode spawn loop on it, and
+        // bridge inbound orchestrator commands (SetPlayers, Stop) into the
+        // existing TCP control protocol so real players actually spawn.
+        let bridge_port = orchestrated_mode::pick_free_local_port()
+            .await
+            .expect("pick free local port for orchestrated bridge");
+        let mut cfg_for_control = cfg.clone();
+        cfg_for_control.control_port = bridge_port;
+        cfg_for_control.run_forever = true;
+        // Initial player count of 0 — the bridge will push the actual
+        // initial value via SET_PLAYERS once it's connected to the
+        // orchestrator. Without this, the spawn loop would burst the
+        // initial cfg.players up before any orchestrator command lands.
+        cfg_for_control.players = 0;
+
+        let cfg_for_bridge = cfg.clone();
+        let state =
+            orchestrated_mode::OrchestratedState::new(cfg.players, cfg.inter_spawn_delay_ms);
+        let bridge_state = state.clone();
+        let bridge = tokio::spawn(async move {
+            if let Err(e) =
+                orchestrated_mode::run_ws_to_tcp_bridge(cfg_for_bridge, bridge_port, bridge_state)
+                    .await
+            {
+                eprintln!("arcane-swarm(orchestrated bridge): {}", e);
+            }
+        });
+
+        run_control_mode(cfg_for_control, tick_interval).await;
+        let _ = bridge.await;
         return;
     }
 
