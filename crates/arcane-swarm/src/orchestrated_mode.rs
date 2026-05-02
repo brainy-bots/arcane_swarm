@@ -179,28 +179,32 @@ pub async fn run_ws_to_tcp_bridge(
     let writer = tokio::spawn(async move {
         loop {
             if writer_stop.load(Ordering::Relaxed) {
+                eprintln!("arcane-swarm(orchestrated): writer exit — stop signaled");
                 return;
             }
             tokio::select! {
                 Some(msg) = hb_rx.recv() => {
-                    if sender
+                    if let Err(e) = sender
                         .send(Message::Text(serde_json::to_string(&msg).unwrap()))
                         .await
-                        .is_err()
                     {
+                        eprintln!("arcane-swarm(orchestrated): writer exit on heartbeat send: {}", e);
                         return;
                     }
                 }
                 Some(msg) = ack_rx.recv() => {
-                    if sender
+                    if let Err(e) = sender
                         .send(Message::Text(serde_json::to_string(&msg).unwrap()))
                         .await
-                        .is_err()
                     {
+                        eprintln!("arcane-swarm(orchestrated): writer exit on ack send: {}", e);
                         return;
                     }
                 }
-                else => return,
+                else => {
+                    eprintln!("arcane-swarm(orchestrated): writer exit — both channels closed");
+                    return;
+                }
             }
         }
     });
@@ -210,9 +214,13 @@ pub async fn run_ws_to_tcp_bridge(
     while let Some(msg_result) = receiver.next().await {
         let msg = match msg_result {
             Ok(m) => m,
-            Err(_) => break,
+            Err(e) => {
+                eprintln!("arcane-swarm(orchestrated): reader exit on WS error: {}", e);
+                break;
+            }
         };
         if msg.is_close() {
+            eprintln!("arcane-swarm(orchestrated): reader exit — close frame received");
             break;
         }
         if !msg.is_text() {
