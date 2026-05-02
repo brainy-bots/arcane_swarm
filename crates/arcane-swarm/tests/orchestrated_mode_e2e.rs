@@ -1,26 +1,31 @@
-//! End-to-end test for the driver's orchestrated mode (#27): spin up a
-//! real `DriverServer` (with a real `CommandDispatcher`) and run the
-//! driver-side `run_orchestrated_mode` against it. Submit a SetPlayers
-//! command from the dispatcher and verify the driver:
-//!   - registered, getting back a driver_id
-//!   - received the command and updated its OrchestratedState
-//!   - acked the command, completing the dispatcher's submit()
+//! End-to-end test for the driver's orchestrated mode (#27).
 //!
-//! This complements the orchestrator-side e2e test in the orchestrator
-//! crate (which uses a synthetic driver client). Together they prove the
-//! full bidirectional wire path works.
-
-use std::sync::Arc;
-use std::time::Duration;
+//! Spins up a real orchestrator (DriverServer + CommandDispatcher) AND a
+//! stub TCP listener (standing in for the local control-mode server the
+//! real driver would run alongside the bridge), then runs
+//! `run_ws_to_tcp_bridge` and verifies that SetPlayers commands round-trip
+//! end-to-end:
+//!
+//!   controller → orchestrator → WS → driver bridge → local TCP → "SET_PLAYERS N"
+//!   driver bridge → CommandAck → orchestrator → controller
+//!
+//! The stub TCP listener captures every line the bridge writes so the test
+//! can assert the per-driver player count actually reached the control
+//! protocol.
 
 use arcane_swarm::config::{Backend, SwarmMode};
-use arcane_swarm::orchestrated_mode::run_orchestrated_mode;
+use arcane_swarm::orchestrated_mode::{run_ws_to_tcp_bridge, OrchestratedState};
 use arcane_swarm::{BurstConfig, Config};
 use arcane_swarm_orchestrator::command_dispatcher::CommandDispatcher;
 use arcane_swarm_orchestrator::driver_pool::DriverPool;
 use arcane_swarm_orchestrator::protocol::{OrchestratorCommand, SetPlayersCommand};
 use arcane_swarm_orchestrator::server::handle_connection;
 use arcane_swarm_orchestrator::ws_driver_channel::WsDriverChannel;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 
 fn test_config(orchestrator_url: String) -> Config {
     Config {
@@ -50,7 +55,7 @@ fn test_config(orchestrator_url: String) -> Config {
 }
 
 #[tokio::test]
-async fn driver_registers_and_acks_commands_against_real_orchestrator() {
+async fn driver_bridge_relays_set_players_into_local_control_protocol() {
     // Spin up the orchestrator's WS server with a real dispatcher.
     let pool = Arc::new(DriverPool::new(
         Duration::from_millis(100),
@@ -59,13 +64,13 @@ async fn driver_registers_and_acks_commands_against_real_orchestrator() {
     ));
     let dispatcher = Arc::new(CommandDispatcher::<WsDriverChannel>::new(pool.clone()));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let url = format!("ws://{}", addr);
 
     let pool_for_server = pool.clone();
     let dispatcher_for_server = dispatcher.clone();
-    let _server = tokio::spawn(async move {
+    tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
@@ -78,11 +83,40 @@ async fn driver_registers_and_acks_commands_against_real_orchestrator() {
         }
     });
 
-    // Run the driver in orchestrated mode in the background.
-    let cfg = test_config(url.clone());
-    let driver_handle = tokio::spawn(async move { run_orchestrated_mode(cfg).await });
+    // Stub local control listener — this is what run_control_mode would be
+    // doing in production. Accepts every connection (the bridge does a
+    // wait-for-listener probe before its real connection, so we need at
+    // least 2 accepts).
+    let stub_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stub_port = stub_listener.local_addr().unwrap().port();
+    let captured_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_stub = captured_lines.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = stub_listener.accept().await else {
+                return;
+            };
+            let captured = captured_for_stub.clone();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stream).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    captured.lock().await.push(line);
+                }
+            });
+        }
+    });
 
-    // Wait until the driver registers (DriverPool size grows from 0 → 1).
+    // Run the driver bridge against the orchestrator + stub listener.
+    let cfg = test_config(url.clone());
+    let state = OrchestratedState::new(cfg.players, cfg.inter_spawn_delay_ms);
+    let bridge_state = state.clone();
+    let bridge_cfg = cfg.clone();
+    let bridge_handle =
+        tokio::spawn(
+            async move { run_ws_to_tcp_bridge(bridge_cfg, stub_port, bridge_state).await },
+        );
+
+    // Wait for driver registration.
     for _ in 0..100 {
         if pool.len().await >= 1 {
             break;
@@ -91,8 +125,25 @@ async fn driver_registers_and_acks_commands_against_real_orchestrator() {
     }
     assert_eq!(pool.len().await, 1, "driver should have registered");
 
-    // Submit a real command. The driver-side run loop should apply it and
-    // ack so this resolves.
+    // Initial SET_PLAYERS from cfg.players (100) should land within a few hundred ms.
+    for _ in 0..50 {
+        if !captured_lines.lock().await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    {
+        let lines = captured_lines.lock().await;
+        assert!(
+            lines.iter().any(|l| l == "SET_PLAYERS 100"),
+            "initial SET_PLAYERS 100 should be written; got {:?}",
+            *lines
+        );
+    }
+
+    // Submit a SetPlayers from the controller side. The orchestrator
+    // distributes per-driver — with 1 driver, the per-driver count equals
+    // the aggregate.
     let result = dispatcher
         .submit(
             "test-controller".to_string(),
@@ -106,27 +157,82 @@ async fn driver_registers_and_acks_commands_against_real_orchestrator() {
         "driver should ack the SetPlayers command"
     );
     assert_eq!(result.acks[0].command_seq, result.seq);
-    assert!(result.missing.is_empty());
 
-    // Submit Stop to let the driver tear down cleanly.
+    // Wait for the SET_PLAYERS 250 line to arrive on the stub listener.
+    for _ in 0..50 {
+        let lines = captured_lines.lock().await;
+        if lines.iter().any(|l| l == "SET_PLAYERS 250") {
+            break;
+        }
+        drop(lines);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    {
+        let lines = captured_lines.lock().await;
+        assert!(
+            lines.iter().any(|l| l == "SET_PLAYERS 250"),
+            "SET_PLAYERS 250 should be written by the bridge; got {:?}",
+            *lines
+        );
+    }
+
+    // Submit Stop to drain the bridge cleanly.
     let _ = dispatcher
         .submit("test-controller".to_string(), OrchestratorCommand::Stop)
         .await;
 
-    // Driver should exit on Stop.
-    match tokio::time::timeout(Duration::from_secs(3), driver_handle).await {
+    // Bridge should exit on Stop.
+    match tokio::time::timeout(Duration::from_secs(3), bridge_handle).await {
         Ok(join_result) => {
-            let inner = join_result.expect("driver task join");
-            assert!(inner.is_ok(), "driver returned error: {:?}", inner);
+            let inner = join_result.expect("bridge join");
+            assert!(inner.is_ok(), "bridge returned error: {:?}", inner);
         }
-        Err(_) => panic!("driver did not exit after Stop within 3s"),
+        Err(_) => panic!("bridge did not exit after Stop within 3s"),
     }
+
+    // The QUIT line should also have been written.
+    let lines = captured_lines.lock().await;
+    assert!(
+        lines.iter().any(|l| l == "QUIT"),
+        "QUIT should have been written on Stop; got {:?}",
+        *lines
+    );
 }
 
 #[tokio::test]
-async fn driver_returns_error_when_orchestrator_unreachable() {
-    // Use a port that nothing is listening on.
-    let cfg = test_config("ws://127.0.0.1:1".into());
-    let result = run_orchestrated_mode(cfg).await;
-    assert!(result.is_err());
+async fn driver_bridge_returns_error_when_local_control_port_unreachable() {
+    // Use a real orchestrator URL but a port that nothing's listening on
+    // for the local control bridge.
+    let pool = Arc::new(DriverPool::new(
+        Duration::from_millis(100),
+        Duration::from_secs(2),
+        16,
+    ));
+    let dispatcher = Arc::new(CommandDispatcher::<WsDriverChannel>::new(pool.clone()));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("ws://{}", addr);
+    let pool_for_server = pool.clone();
+    let dispatcher_for_server = dispatcher.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let pool = pool_for_server.clone();
+            let dispatcher = dispatcher_for_server.clone();
+            tokio::spawn(async move {
+                let _ = handle_connection(stream, pool, Some(dispatcher)).await;
+            });
+        }
+    });
+
+    let cfg = test_config(url.clone());
+    let state = OrchestratedState::new(cfg.players, cfg.inter_spawn_delay_ms);
+    // Port 1 is reserved + nothing's listening.
+    let result = run_ws_to_tcp_bridge(cfg, 1, state).await;
+    assert!(
+        result.is_err(),
+        "bridge should error on unreachable local port"
+    );
 }

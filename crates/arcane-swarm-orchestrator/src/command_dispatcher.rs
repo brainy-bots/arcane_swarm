@@ -11,7 +11,7 @@
 //! and replies with scripted acks.
 
 use crate::driver_pool::{DriverPool, DriverState};
-use crate::protocol::{CommandAck, DriverId, OrchestratorCommand};
+use crate::protocol::{CommandAck, DriverId, OrchestratorCommand, SetPlayersCommand};
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -128,12 +128,47 @@ impl<C: DriverChannel + 'static> CommandDispatcher<C> {
         }
 
         // Snapshot per-driver channels under the read lock, then drop it.
-        let channels: HashMap<DriverId, Arc<C>> = {
+        // Sort by DriverId so the per-driver distribution below is
+        // deterministic — without this, the remainder allocation for
+        // SetPlayers would jitter across calls.
+        let mut active_with_channels: Vec<(DriverId, Arc<C>)> = {
             let map = self.channels.read().await;
             active
                 .iter()
                 .filter_map(|id| map.get(id).map(|ch| (*id, Arc::clone(ch))))
                 .collect()
+        };
+        active_with_channels.sort_by_key(|(id, _)| *id);
+
+        // For SetPlayers, the orchestrator OWNS the per-driver allocation.
+        // The controller submits an AGGREGATE target; the orchestrator
+        // divides it across the active drivers (with the remainder spread
+        // across the first `rem` drivers so the sum exactly equals the
+        // submitted target). All other commands broadcast unchanged.
+        let per_driver_commands: Vec<(DriverId, Arc<C>, OrchestratorCommand)> = match &command {
+            OrchestratorCommand::SetPlayers(set) => {
+                let k = active_with_channels.len() as u32;
+                let base = set.player_count.checked_div(k).unwrap_or(0);
+                let rem = set.player_count.checked_rem(k).unwrap_or(0);
+                active_with_channels
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (id, ch))| {
+                        let per = base + if (i as u32) < rem { 1 } else { 0 };
+                        (
+                            id,
+                            ch,
+                            OrchestratorCommand::SetPlayers(SetPlayersCommand {
+                                player_count: per,
+                            }),
+                        )
+                    })
+                    .collect()
+            }
+            _ => active_with_channels
+                .into_iter()
+                .map(|(id, ch)| (id, ch, command.clone()))
+                .collect(),
         };
 
         // Fan out. Each task pushes its (driver_id, result) onto a shared
@@ -141,10 +176,9 @@ impl<C: DriverChannel + 'static> CommandDispatcher<C> {
         // every task reports or the fan-out deadline elapses. Cancellation
         // of slow tasks is implicit — they remain spawned but their results
         // are ignored once we move past the deadline.
-        let n = channels.len();
+        let n = per_driver_commands.len();
         let (tx, mut rx) = mpsc::channel(n.max(1));
-        for (driver_id, ch) in channels {
-            let cmd = command.clone();
+        for (driver_id, ch, cmd) in per_driver_commands {
             let tx = tx.clone();
             tokio::spawn(async move {
                 let result = ch.send(seq, cmd).await;
