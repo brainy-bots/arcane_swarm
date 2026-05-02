@@ -154,6 +154,15 @@ impl<E: ClusterEndpoint + 'static> StatsCollector<E> {
         self.series.read().await.get(url).cloned()
     }
 
+    /// Latest sample per cluster. The telemetry source uses this to embed a
+    /// per-cluster `/stats` summary in each snapshot.
+    pub async fn latest_per_cluster(&self) -> std::collections::HashMap<String, ClusterStats> {
+        let map = self.series.read().await;
+        map.iter()
+            .filter_map(|(url, series)| series.last().map(|s| (url.clone(), s.stats.clone())))
+            .collect()
+    }
+
     /// Drive one poll round across all endpoints. Public so tests can step
     /// the collector deterministically without spawning the run loop.
     /// Each Err from `endpoint.fetch()` is logged and skipped (the collector
