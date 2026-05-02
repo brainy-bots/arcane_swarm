@@ -100,35 +100,103 @@ impl<E: ClusterEndpoint + 'static> StatsCollector<E> {
     }
 
     /// Fetch the latest derived rates across all polled clusters. Returns
-    /// `None` if no samples have been collected yet.
-    ///
-    /// Implementation lands in C3 PR. Test contract is in
-    /// `tests/stats_collector.rs`.
+    /// `None` if no clusters have been polled yet.
     pub async fn current_rates(&self) -> Option<RatesSnapshot> {
-        unimplemented!("C3: rate computation — see tests/stats_collector.rs")
+        let map = self.series.read().await;
+        if map.is_empty() {
+            return None;
+        }
+        let mut total_bytes_per_sec = 0.0;
+        let mut total_lagged = 0u64;
+        let mut total_bytes_out = 0u64;
+        for series in map.values() {
+            if series.len() < 2 {
+                continue;
+            }
+            let oldest = series.first().unwrap();
+            let newest = series.last().unwrap();
+            let secs = (newest.stats.sampled_at - oldest.stats.sampled_at).as_secs_f64();
+            if secs > 0.0 {
+                let delta_bytes = newest
+                    .stats
+                    .bytes_out
+                    .saturating_sub(oldest.stats.bytes_out)
+                    as f64;
+                total_bytes_per_sec += delta_bytes / secs;
+            }
+            total_lagged += newest
+                .stats
+                .broadcast_lagged_events
+                .saturating_sub(oldest.stats.broadcast_lagged_events);
+            total_bytes_out += newest
+                .stats
+                .bytes_out
+                .saturating_sub(oldest.stats.bytes_out);
+        }
+        // Lagged broadcasts vs. successful broadcasts isn't directly available
+        // from byte counters alone; surface a proxy that's 1.0 when nothing
+        // was lagged and degrades as lagged_events grows. Real delta_hit_rate
+        // wiring lands when the cluster exposes broadcasts_attempted (#94).
+        let delta_hit_rate = if total_bytes_out > 0 {
+            1.0 - (total_lagged as f64 / total_bytes_out as f64).min(1.0)
+        } else {
+            1.0
+        };
+        Some(RatesSnapshot {
+            bytes_out_per_sec: total_bytes_per_sec,
+            delta_hit_rate,
+            egress_aggregate_gbps: total_bytes_per_sec * 8.0 / 1_000_000_000.0,
+        })
     }
 
-    /// Read the full per-endpoint time series for one cluster. Returns
-    /// `None` if no samples for that URL.
-    pub async fn time_series_for(&self, _url: &str) -> Option<Vec<StatsSample>> {
-        unimplemented!("C3: per-endpoint time-series read — see tests/stats_collector.rs")
+    /// Read the full per-endpoint time series for one cluster.
+    pub async fn time_series_for(&self, url: &str) -> Option<Vec<StatsSample>> {
+        self.series.read().await.get(url).cloned()
     }
 
     /// Drive one poll round across all endpoints. Public so tests can step
     /// the collector deterministically without spawning the run loop.
     /// Each Err from `endpoint.fetch()` is logged and skipped (the collector
-    /// continues polling on the next tick).
+    /// continues polling on the next tick). Returns the number of endpoints
+    /// that successfully produced a sample this round.
     pub async fn poll_once(&self) -> Result<usize, String> {
-        unimplemented!("C3: single poll round — see tests/stats_collector.rs")
+        let mut succeeded = 0usize;
+        let mut series_map = self.series.write().await;
+        for endpoint in &self.endpoints {
+            match endpoint.fetch().await {
+                Ok(stats) => {
+                    let sample = StatsSample {
+                        stats: stats.clone(),
+                        recorded_at: Instant::now(),
+                    };
+                    let series = series_map.entry(endpoint.url().to_string()).or_default();
+                    series.push(sample);
+                    // Prune by sample's own time axis (sampled_at): keeps the
+                    // window at the documented "rolling N-minute" semantic
+                    // even when polling is bursty or replayed from a recipe.
+                    if let Some(cutoff) = stats.sampled_at.checked_sub(self.retention) {
+                        series.retain(|s| s.stats.sampled_at >= cutoff);
+                    }
+                    succeeded += 1;
+                }
+                Err(_) => {
+                    // Transient failure — caller can inspect status; collector
+                    // does not give up, the next tick will retry.
+                }
+            }
+        }
+        Ok(succeeded)
     }
 
-    /// Spawn the polling loop as a background tokio task. Returns a handle
-    /// so the caller can join or cancel.
-    ///
-    /// Production code calls this once at startup. Tests prefer `poll_once`.
+    /// Spawn the polling loop in the current task. Production code typically
+    /// calls this from a `tokio::spawn`; tests use `poll_once` directly.
+    /// Never returns under normal operation.
     pub async fn run(&self) -> Result<(), String> {
-        let _ = (&self.endpoints, &self.poll_interval, &self.retention);
-        unimplemented!("C3: collector run loop — see tests/stats_collector.rs")
+        let mut ticker = tokio::time::interval(self.poll_interval);
+        loop {
+            ticker.tick().await;
+            let _ = self.poll_once().await;
+        }
     }
 
     /// Read-only status snapshot.
