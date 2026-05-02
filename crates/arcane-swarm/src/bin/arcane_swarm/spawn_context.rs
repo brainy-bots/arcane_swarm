@@ -41,7 +41,7 @@ pub(crate) struct ControlSpawnKit<'a> {
     pub handles: &'a mut Vec<Option<tokio::task::JoinHandle<()>>>,
     pub player_stop_flags: &'a Arc<Vec<Arc<AtomicBool>>>,
     pub loop_shared: &'a PlayerLoopShared,
-    pub backend_runtime: &'a Arc<dyn crate::BackendRuntime>,
+    pub backend_runtime: &'a Arc<dyn crate::runtime::BackendRuntime>,
     pub tick_interval: Duration,
     pub read_rate: f64,
 }
@@ -60,11 +60,12 @@ pub(crate) fn spawn_control_mode_player(
         tick_interval: kit.tick_interval,
         stop,
     };
+    let handles = crate::runtime::SharedHandles::from_player_loop_shared(kit.loop_shared);
     kit.handles[idx] = Some(
         kit.backend_runtime
-            .spawn_player(kit.loop_shared, params.clone()),
+            .spawn_player(handles.clone(), params.clone()),
     );
     let _ = kit
         .backend_runtime
-        .spawn_read(kit.loop_shared, &params, kit.read_rate);
+        .spawn_read(&handles, &params, kit.read_rate);
 }
