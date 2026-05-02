@@ -1,3 +1,4 @@
+pub mod command_dispatcher;
 pub mod driver_pool;
 pub mod protocol;
 pub mod server;
