@@ -15,6 +15,10 @@ use crate::runtime::SharedHandles;
 /// Action-loop config (rate, metrics, target pool) lives here too because both
 /// backends carry movement and actions on the same WebSocket — so both
 /// `spawn_player` implementations need to read it from one place.
+///
+/// Fields are only accessed through the `spawn_read` trait method across
+/// backends, which the compiler cannot statically prove. Suppress dead_code.
+#[allow(dead_code)]
 pub(crate) struct PlayerLoopShared {
     pub http_client: reqwest::Client,
     pub metrics: Arc<Metrics>,
