@@ -120,25 +120,28 @@ pub async fn handle_connection(
                         command: cmd,
                     });
                     let Ok(text) = serde_json::to_string(&envelope) else { continue };
-                    if ws_sender
+                    if let Err(e) = ws_sender
                         .send(tokio_tungstenite::tungstenite::Message::Text(text))
                         .await
-                        .is_err()
                     {
+                        eprintln!("orchestrator(server): per-conn writer exit on command send: {}", e);
                         return;
                     }
                 }
                 Some(resp) = resp_rx.recv() => {
                     let Ok(text) = serde_json::to_string(&resp) else { continue };
-                    if ws_sender
+                    if let Err(e) = ws_sender
                         .send(tokio_tungstenite::tungstenite::Message::Text(text))
                         .await
-                        .is_err()
                     {
+                        eprintln!("orchestrator(server): per-conn writer exit on response send: {}", e);
                         return;
                     }
                 }
-                else => return,
+                else => {
+                    eprintln!("orchestrator(server): per-conn writer exit — both channels closed");
+                    return;
+                }
             }
         }
     });
