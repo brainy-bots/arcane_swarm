@@ -29,7 +29,7 @@ async fn start_test_server(
             let (stream, _) = listener.accept().await.unwrap();
             let pool = pool_for_server.clone();
             tokio::spawn(async move {
-                let _ = crate::server::handle_connection(stream, pool).await;
+                let _ = crate::server::handle_connection(stream, pool, None).await;
             });
         }
     });

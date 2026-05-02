@@ -28,10 +28,11 @@ impl MockDriverChannel {
     }
 }
 impl DriverChannel for MockDriverChannel {
-    async fn send(&self, _command: OrchestratorCommand) -> Result<CommandAck, String> {
+    async fn send(&self, seq: u64, _command: OrchestratorCommand) -> Result<CommandAck, String> {
+        let _ = self.seq.fetch_add(1, Ordering::SeqCst);
         Ok(CommandAck {
             driver_id: self.driver_id,
-            command_seq: self.seq.fetch_add(1, Ordering::SeqCst),
+            command_seq: seq,
         })
     }
 }

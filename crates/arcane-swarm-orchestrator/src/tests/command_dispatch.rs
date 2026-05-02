@@ -49,15 +49,16 @@ impl MockDriverChannel {
 }
 
 impl DriverChannel for MockDriverChannel {
-    async fn send(&self, command: OrchestratorCommand) -> Result<CommandAck, String> {
+    async fn send(&self, seq: u64, command: OrchestratorCommand) -> Result<CommandAck, String> {
         self.sent.lock().await.push(command);
         if self.block_forever {
             tokio::time::sleep(Duration::from_secs(60)).await;
             return Err("blocked".to_string());
         }
+        let _ = self.seq_counter.fetch_add(1, Ordering::SeqCst);
         Ok(CommandAck {
             driver_id: self.driver_id,
-            command_seq: self.seq_counter.fetch_add(1, Ordering::SeqCst),
+            command_seq: seq,
         })
     }
 }
