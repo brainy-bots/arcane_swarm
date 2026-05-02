@@ -114,6 +114,12 @@ impl DriverPool {
     pub async fn get_state(&self, driver_id: DriverId) -> Option<DriverState> {
         self.drivers.read().await.get(&driver_id).map(|e| e.state)
     }
+
+    /// Snapshot every driver's current entry. Cheap clone — used by the
+    /// telemetry source to embed fleet state in each broadcast snapshot.
+    pub async fn snapshot(&self) -> Vec<DriverEntry> {
+        self.drivers.read().await.values().cloned().collect()
+    }
 }
 
 #[cfg(test)]
