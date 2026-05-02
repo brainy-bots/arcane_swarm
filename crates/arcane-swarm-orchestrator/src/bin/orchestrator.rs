@@ -161,7 +161,27 @@ async fn main() {
         Duration::from_secs(15),
         args.max_drivers,
     ));
-    let dispatcher = Arc::new(CommandDispatcher::<WsDriverChannel>::new(pool.clone()));
+    // Bump fan-out deadline well above the default 100ms — under real load,
+    // drivers can take >100ms to ack a Command (TCP write to control mode +
+    // mpsc round-trip + WS write back). 5s is generous; commands still
+    // either ack within ~100ms or appear "missing" in the log, and the
+    // controller's per-phase wall-clock isn't on the critical path.
+    let dispatcher = Arc::new(
+        CommandDispatcher::<WsDriverChannel>::new(pool.clone())
+            .with_fan_out_deadline(Duration::from_secs(5)),
+    );
+
+    // Periodic stale-driver sweep. Without this, drivers that disconnect
+    // silently stay marked Active in the pool, which makes the dispatcher
+    // try to broadcast to dead channels indefinitely.
+    let pool_for_stale = pool.clone();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            ticker.tick().await;
+            pool_for_stale.mark_stale_drivers().await;
+        }
+    });
 
     let endpoints: Vec<Arc<HttpClusterEndpoint>> = args
         .cluster_stats_urls
