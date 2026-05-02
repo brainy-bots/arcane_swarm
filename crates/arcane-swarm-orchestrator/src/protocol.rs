@@ -56,6 +56,49 @@ pub struct ErrorResponse {
     pub message: String,
 }
 
+// -----------------------------------------------------------------------------
+// Orchestrator → driver commands (real-time command dispatch, C2).
+//
+// The orchestrator carries no benchmark vocabulary. Commands are domain-neutral
+// instructions a controller can submit at any time. Initial set is the minimum
+// required to recreate today's benchmark behavior; new commands get added when
+// a controller needs them.
+// -----------------------------------------------------------------------------
+
+/// Command pushed from the orchestrator to a registered driver. The driver
+/// applies the command and acknowledges via `CommandAck` back-message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub enum OrchestratorCommand {
+    /// Set the steady-state player count on the driver. The driver adjusts
+    /// its local fleet slice to match its share of the global target.
+    #[serde(rename = "set_players")]
+    SetPlayers(SetPlayersCommand),
+    /// Set the inter-spawn delay used while ramping the player count up
+    /// (mirrors the existing `--inter-spawn-delay-ms` flag from PR #17).
+    #[serde(rename = "set_spawn_delay_ms")]
+    SetSpawnDelayMs(SetSpawnDelayMsCommand),
+    /// Tear down the local fleet slice, flush telemetry, deregister.
+    #[serde(rename = "stop")]
+    Stop,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetPlayersCommand {
+    pub player_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetSpawnDelayMsCommand {
+    pub spawn_delay_ms: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommandAck {
+    pub driver_id: DriverId,
+    pub command_seq: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
