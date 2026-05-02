@@ -1,4 +1,4 @@
-# Swarm Orchestrator — MVP design
+# Swarm Orchestrator — design
 
 **Status:** design discussion (not yet implemented)
 **Owner:** Martin
@@ -19,7 +19,7 @@ This works, but it leaves three structural problems on the table that get worse 
 2. **No real-time control.** Per-tier validity is computed *after* the run finishes. If tier 3 of 12 fails the latency gate, the harness still runs tiers 4–12, wasting ~20 minutes and ~$4 of fleet time.
 3. **No coordination plane between drivers.** Adversarial-motion experiments, cohort bursts, dynamic load shape, and any other "all drivers do X at the same instant" feature is currently emulated by per-driver clock sync, which is fragile.
 
-This document specifies the minimum viable orchestrator that solves them — and the architectural separation that keeps it general-purpose.
+This document specifies the orchestrator that solves them — and the architectural separation that keeps it general-purpose.
 
 ## Architectural separation: orchestrator vs controller
 
@@ -86,7 +86,7 @@ This is not benchmark scaffolding. A swarm orchestrator with driver registration
 - Multiple SSE subscribers can connect at once (benchmark controller + operator dashboard + future tools).
 - The orchestrator command vocabulary is intentionally minimal and domain-neutral — `SetPlayers`, `SetSpawnDelayMs`, `Stop`. New commands are added as the controller needs them; the orchestrator never gains "tier" or "phase" verbs.
 
-## MVP component list
+## Component list
 
 Each component below is one PR. Each PR ships with a pre-written test file that is the agent's success criterion.
 
@@ -183,16 +183,16 @@ For each component PR, the structure is:
 - Foundation PR (human): trait/interface definitions + test file with all acceptance tests scaffolded (or `#[ignore]`-d if they require an unfinished implementation).
 - Implementation PR (agent): write the implementation that makes the tests pass.
 
-## What's deliberately out of scope for MVP
+## What's deliberately out of scope
 
-- **Browser-based dashboard.** Terminal CLI is enough.
-- **Mid-run dynamic driver scale-up.** Fleet is fixed at run start.
-- **Multi-region orchestration.** Single-region only.
+- **Browser-based dashboard.** Terminal CLI is enough; browser version added when there is demand.
+- **Mid-run dynamic driver scale-up.** Fleet is fixed at run start; scale-up requires its own design.
+- **Multi-region orchestration.** Single-region only; multi-region requires its own design.
 - **Driver provisioning.** Stays Terraform.
-- **Replacement of the existing PowerShell harness for non-orchestrated paths.** Standalone driver mode keeps the existing path alive.
-- **Authentication beyond VPC scoping.** Operator-laptop-to-orchestrator is plain HTTPS over a known instance ID; security group keeps it scoped to the operator's CIDR.
+- **Replacement of the existing PowerShell harness for non-orchestrated paths.** Standalone driver mode keeps the existing path alive during the controller rollout.
+- **Authentication beyond VPC scoping.** Operator-laptop-to-orchestrator is plain HTTPS over a known instance ID; security group keeps it scoped to the operator's CIDR. Stronger auth (mTLS / JWT) is added when the deployment requires it.
 
-## Phased delivery
+## Delivery sequence
 
 1. **Foundation PR** (this design + test scaffolding). Largely done — C1 + skeleton merged. Remaining scaffolding for command dispatch, stats collector, SSE, telemetry archive lands on the existing branch.
 2. **Component PRs**: command dispatch (C2) → stats collector (C3) → telemetry SSE (C5) → telemetry archive (C6). Each unignores its own tests; each is one agent task.
@@ -204,12 +204,12 @@ For each component PR, the structure is:
 ## Open decisions
 
 - **Wire protocol for driver ↔ orchestrator and controller ↔ orchestrator: WebSocket-over-TLS** (recommended). Already used between driver and cluster.
-- **State persistence on orchestrator restart.** MVP: in-memory only; restart aborts the run cleanly. Post-MVP: optional SQLite checkpoint for soak-test resilience.
-- **Authentication.** MVP: VPC-scoped HTTPS only. Post-MVP: mTLS or JWT-bearer if multi-tenant ever shows up.
+- **State persistence on orchestrator restart.** Default: in-memory only; a restart aborts the run cleanly. Optional SQLite checkpoint can be added when soak-test resilience requires it.
+- **Authentication.** Default: VPC-scoped HTTPS only. mTLS or JWT-bearer added when a multi-tenant deployment requires it.
 
-## Definition of done for the MVP
+## Definition of done
 
-The orchestrator is "MVP done" when all six of these pass:
+The orchestrator is done when all six of these pass:
 
 1. The current 13,500-CCU headline benchmark completes via [benchmark controller → orchestrator → drivers] with results within 1% of the prior baseline.
 2. Real-time terminal dashboard renders during the run (subscribed to orchestrator SSE).
