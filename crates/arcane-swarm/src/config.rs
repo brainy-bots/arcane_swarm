@@ -73,6 +73,11 @@ pub struct Config {
     /// into the soft-saturation zone where measurements become unreliable —
     /// the orchestrator must provision more drivers instead.
     pub max_players_per_driver: u32,
+    /// When set, the driver runs in orchestrated mode: connects to the named
+    /// swarm orchestrator over WebSocket, registers, listens for commands,
+    /// and acks. Mutually exclusive with the standalone player-spawning path.
+    /// When unset (default), the driver runs in standalone mode unchanged.
+    pub orchestrator_url: Option<String>,
 }
 
 pub fn parse_args() -> Config {
@@ -97,6 +102,7 @@ pub fn parse_args() -> Config {
     let mut user_data_bytes: usize = 0;
     let mut inter_spawn_delay_ms: u32 = 0;
     let mut max_players_per_driver: u32 = 0;
+    let mut orchestrator_url: Option<String> = std::env::var("ORCHESTRATOR_URL").ok();
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -216,6 +222,10 @@ pub fn parse_args() -> Config {
                 i += 1;
                 max_players_per_driver = args[i].parse().unwrap_or(0);
             }
+            "--orchestrator-url" => {
+                i += 1;
+                orchestrator_url = Some(args[i].clone());
+            }
             "--help" | "-h" => {
                 eprintln!("arcane-swarm: headless client swarm\n");
                 eprintln!("  --backend MODE        spacetimedb | arcane (default spacetimedb)");
@@ -248,6 +258,7 @@ pub fn parse_args() -> Config {
                 eprintln!("  --user-data-bytes N    bytes per PLAYER_STATE.user_data payload (default 0; Arcane backend only)");
                 eprintln!("  --inter-spawn-delay-ms N  ms between consecutive player spawns (default 0; multi-driver join-rate pacing)");
                 eprintln!("  --max-players-per-driver N  hard safety cap on simultaneously-active players (default 0 = no cap; multi-driver runs set this conservatively)");
+                eprintln!("  --orchestrator-url URL  connect to swarm orchestrator over WS and run in orchestrated mode (default unset = standalone)");
                 eprintln!("  --csv PATH             write metrics CSV to this file");
                 eprintln!(
                     "  --uri URL              SpacetimeDB URI (default http://127.0.0.1:3000)"
@@ -288,5 +299,6 @@ pub fn parse_args() -> Config {
         user_data_bytes,
         inter_spawn_delay_ms,
         max_players_per_driver,
+        orchestrator_url,
     }
 }

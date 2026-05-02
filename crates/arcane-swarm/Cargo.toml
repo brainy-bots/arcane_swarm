@@ -24,6 +24,10 @@ spacetimedb-sdk = "2.1"
 # both arcane and arcane_swarm as submodules, so this resolves to the
 # same commit in the benchmark CI.
 arcane-wire = { git = "https://github.com/brainy-bots/arcane.git", branch = "main" }
+# Shared orchestrator wire schema (DriverMessage / OrchestratorResponse /
+# OrchestratorCommand / CommandAck). The orchestrator crate is the source of
+# truth for these types; the driver consumes them under --orchestrator-url.
+arcane-swarm-orchestrator = { path = "../arcane-swarm-orchestrator" }
 
 [[bin]]
 name = "arcane-swarm"
