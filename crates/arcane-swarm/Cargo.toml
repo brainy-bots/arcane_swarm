@@ -19,11 +19,10 @@ libc = "0.2"
 # stays in sync. Bindings live in src/bin/arcane_swarm/spacetimedb_bindings/ and are
 # produced by `spacetime generate --lang rust --module-path <full module>`.
 spacetimedb-sdk = "2.1"
-# Shared wire schema with the cluster (arcane repo). Pinned to main so
-# the benchmark tracks the latest protocol; the benchmark workspace pins
-# both arcane and arcane_swarm as submodules, so this resolves to the
-# same commit in the benchmark CI.
-arcane-wire = { git = "https://github.com/brainy-bots/arcane.git", branch = "main" }
+# Shared wire schema with the cluster (arcane repo). Temporarily pinned to
+# the FlatBuffers epic branch for end-to-end validation (arcane#166).
+# Revert to branch = "main" once the epic merges.
+arcane-wire = { git = "https://github.com/brainy-bots/arcane.git", branch = "epic/166-flatbuffers-wire-format" }
 # Shared orchestrator wire schema (DriverMessage / OrchestratorResponse /
 # OrchestratorCommand / CommandAck). The orchestrator crate is the source of
 # truth for these types; the driver consumes them under --orchestrator-url.

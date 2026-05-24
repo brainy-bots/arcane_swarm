@@ -111,7 +111,7 @@ pub(crate) struct ArcanePlayerLoop {
     pub burst: BurstConfig,
     pub run_started: std::time::Instant,
     /// Per-driver shared decode cache. The drain task consults this before
-    /// running a full `decode_server`; on hit it skips the postcard parse
+    /// running a full `decode_server`; on hit it skips the FlatBuffer decode
     /// entirely and reads the cached entity-id set. See `delta_cache.rs`
     /// for the architecture rationale.
     pub delta_cache: Arc<DeltaCache>,
@@ -223,7 +223,7 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
                     // identical payloads — decoding 1437× is wasted work.
                     // The first drain to see this frame decodes it and
                     // populates the cache; the rest hit the cache and skip
-                    // the postcard parse. See `delta_cache.rs`.
+                    // the FlatBuffer decode. See `delta_cache.rs`.
                     let cached: Arc<CachedDelta> = match cache_drain.lookup(&bin) {
                         Some(e) => e,
                         None => match decode_server(&bin) {
@@ -326,7 +326,7 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
             );
         }
 
-        // Send movement — binary postcard frame for fairness with SpacetimeDB's
+        // Send movement — binary FlatBuffer frame for fairness with SpacetimeDB's
         // BSATN. See brainy-bots/arcane#28 for motivation.
         let msg = encode_player_state(
             &player.id,

@@ -1,6 +1,6 @@
 //! Wire-format helpers shared by backends (e.g. Arcane WebSocket payloads).
 //!
-//! The Arcane wire protocol uses postcard-encoded binary frames from
+//! The Arcane wire protocol uses FlatBuffer-encoded binary frames from
 //! [`arcane_wire`]. This module exposes small helpers that build the
 //! binary frame bytes from the values a backend loop already has on hand,
 //! so backend code doesn't need to know about the wire schema.
@@ -15,7 +15,7 @@ use arcane_wire::{
 /// Spatial query radius (server units) for SpacetimeDB read simulation.
 pub const VISIBILITY_RADIUS: f64 = 1500.0;
 
-/// Encode one `PLAYER_STATE` frame as postcard bytes for the Arcane cluster
+/// Encode one `PLAYER_STATE` frame as FlatBuffer bytes for the Arcane cluster
 /// WebSocket. Returned bytes are ready to send as `Message::Binary`.
 ///
 /// `user_data` is opaque per-entity payload that flows through the cluster's
@@ -46,10 +46,7 @@ pub fn encode_player_state(
         velocity: Vec3Q::from_vec3(WireVec3::new(vx, vy, vz)),
         user_data: user_data.to_vec(),
     });
-    // encode_client returns Err only on allocator failure or serialize-bug;
-    // both are fatal rather than recoverable for a benchmark client — unwrap
-    // so any such bug fails loudly instead of silently dropping messages.
-    encode_client(&frame).expect("postcard encode of ClientFrame::PlayerState cannot fail")
+    encode_client(&frame)
 }
 
 /// Fill `buf` with approximately `len` bytes of deterministic-but-varied
@@ -123,7 +120,7 @@ pub fn fill_pseudo_user_data(buf: &mut Vec<u8>, len: usize, player_seed: u64, ti
     buf.extend_from_slice(&bytes);
 }
 
-/// Encode one `GAME_ACTION` frame as postcard bytes for the Arcane cluster
+/// Encode one `GAME_ACTION` frame as FlatBuffer bytes for the Arcane cluster
 /// WebSocket. `payload` is treated as opaque application bytes (typically
 /// the caller passes in JSON bytes).
 pub fn encode_game_action(entity_id: &uuid::Uuid, action_type: &str, payload: &[u8]) -> Vec<u8> {
@@ -132,7 +129,7 @@ pub fn encode_game_action(entity_id: &uuid::Uuid, action_type: &str, payload: &[
         action_type: action_type.to_string(),
         payload: payload.to_vec(),
     });
-    encode_client(&frame).expect("postcard encode of ClientFrame::Action cannot fail")
+    encode_client(&frame)
 }
 
 #[cfg(test)]

@@ -50,9 +50,9 @@ pub struct CachedDelta {
 
 /// Bounded byte-keyed cache of decoded broadcast deltas.
 ///
-/// The key is the first 32 bytes of the postcard-encoded frame. Those bytes
-/// always include the postcard variant discriminator (1B) + source_cluster_id
-/// (16B) + the start of seq+tick varints, which is enough to uniquely
+/// The key is the first 32 bytes of the FlatBuffer-encoded frame. Those bytes
+/// always include the FlatBuffer root offset + union discriminator +
+/// source_cluster_id (16B) + seq/tick fields, which is enough to uniquely
 /// identify a broadcast in practice — broadcasts from different
 /// (cluster, tick) pairs differ in at least one of those bytes, and bytes
 /// from the *same* broadcast sent to multiple players are bit-for-bit
