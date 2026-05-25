@@ -566,8 +566,34 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
 
 // -- Main ------------------------------------------------------------------
 
+fn raise_fd_limit() {
+    const MIN_SOFT: u64 = 16_384;
+    unsafe {
+        let mut rlim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) != 0 {
+            eprintln!("WARNING: getrlimit(RLIMIT_NOFILE) failed");
+            return;
+        }
+        let (soft, hard) = (rlim.rlim_cur, rlim.rlim_max);
+        eprintln!("fd limits: soft={soft} hard={hard}");
+        if soft < hard {
+            rlim.rlim_cur = hard;
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) == 0 {
+                eprintln!("fd limits: raised soft {soft} → {hard}");
+            }
+        }
+        if rlim.rlim_cur < MIN_SOFT {
+            eprintln!(
+                "WARNING: fd soft limit {} is below {MIN_SOFT} — pass --ulimit nofile={MIN_SOFT}:{MIN_SOFT} to docker run",
+                rlim.rlim_cur
+            );
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    raise_fd_limit();
     let cfg = parse_args();
     let run_started = std::time::Instant::now();
     let tick_interval = Duration::from_micros(1_000_000 / cfg.tick_rate as u64);
