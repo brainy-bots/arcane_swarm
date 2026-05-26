@@ -4,27 +4,19 @@
 //!
 //! ## What the "lat" column means here
 //!
-//! The client's outbound writes are fire-and-forget WebSocket frames —
-//! `sink.send(Message::Binary(_))` returns in nanoseconds once the bytes are
-//! queued in the local send buffer, regardless of whether the cluster is
-//! healthy, lagging, or dead. Timing the call site is therefore meaningless.
-//!
-//! Instead the swarm measures **client-perceived latency**: the wall-clock
-//! gap between "I wrote state at T0" and "the cluster's next broadcast frame
-//! carrying my own entity landed in my receive buffer at T1". That's what a
-//! real game client experiences — action → world-reflection. Under server
-//! load the cluster's tick slides later, the broadcast arrives late, and the
-//! number rises. Under catastrophic load the broadcast stops, and the
-//! `NotDelivered` / `ConnectionDrop` counters pick up.
-//!
-//! The swarm decodes each incoming binary frame via
-//! [`arcane_wire::decode_server`] and walks `DeltaPayload::updated`; when it
-//! finds its own `entity_id` it computes `now - last_send` and records the
-//! sample. Every outbound write (movement or action) updates `last_send`.
+//! The swarm measures **sequence-tagged round-trip latency**: each outbound
+//! `PlayerState` frame carries a monotonic `client_seq` and records the send
+//! `Instant` in a per-player flight table. The cluster echoes `client_seq`
+//! through the entity state back in the broadcast. When the drain task sees
+//! its own entity in a broadcast, it reads the echoed `client_seq`, looks up
+//! the flight table, and computes RTT = `Instant::now() - sent_at`. This
+//! measures the true end-to-end round trip for each specific send, immune to
+//! overwrite artifacts from the previous `last_send` atomic approach.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use arcane_wire::{decode_server, ServerFrame};
 use futures_util::{SinkExt, StreamExt};
@@ -188,34 +180,20 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
     };
     let (mut sink, mut stream) = ws_stream.split();
 
-    // Shared micros-since-run-start of the player's most recent outbound write
-    // (movement or action). The drain task reads this when it spots the
-    // player's own entity_id in an incoming broadcast frame and computes
-    // latency = now - last_send. Using a shared atomic rather than passing
-    // through a channel keeps the hot paths lock-free.
-    let last_send_micros = Arc::new(AtomicI64::new(-1));
-    // Same instant in UNIX micros — used for the cross-clock T2 - T1 wire
-    // portion of the latency decomposition. Updated alongside
-    // `last_send_micros` at every outbound write so they refer to the same
-    // moment.
-    let last_send_unix_us = Arc::new(AtomicI64::new(-1));
+    let flight_table: Arc<tokio::sync::Mutex<BTreeMap<u64, std::time::Instant>>> =
+        Arc::new(tokio::sync::Mutex::new(BTreeMap::new()));
+    let mut next_seq: u64 = 0;
 
     let stop_drain = stop.clone();
     let rm = read_metrics.clone();
     let latency_metrics = metrics.clone();
-    let last_send_drain = last_send_micros.clone();
-    let last_send_unix_drain = last_send_unix_us.clone();
     let my_id = player.id;
-    let drain_run_started = run_started;
     let cache_drain = delta_cache.clone();
+    let flight_drain = flight_table.clone();
     tokio::spawn(async move {
         while !stop_drain.load(Ordering::Relaxed) {
             match stream.next().await {
                 Some(Ok(Message::Binary(bin))) => {
-                    // T_arrival: capture immediately, before any decode or
-                    // cache work, so `drain_us = T3 - T_arrival` is purely
-                    // on-driver post-receive cost. Clock-sync free.
-                    let arrival_us = drain_run_started.elapsed().as_micros() as i64;
                     rm.record_inbound_ok(bin.len() as u64);
                     // Cache lookup first. The cluster encodes each broadcast
                     // once and sends the same bytes to every connected
@@ -230,9 +208,15 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
                             Ok(ServerFrame::Delta(payload)) => {
                                 let entity_ids: HashSet<_> =
                                     payload.updated.iter().map(|e| e.entity_id).collect();
+                                let client_seqs: HashMap<_, _> = payload
+                                    .updated
+                                    .iter()
+                                    .filter(|e| e.client_seq != 0)
+                                    .map(|e| (e.entity_id, e.client_seq))
+                                    .collect();
                                 let entry = Arc::new(CachedDelta {
                                     entity_ids,
-                                    server_ts: payload.timestamp,
+                                    client_seqs,
                                 });
                                 cache_drain.insert(&bin, entry.clone());
                                 entry
@@ -240,36 +224,18 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
                             Err(_) => continue,
                         },
                     };
-                    if cached.entity_ids.contains(&my_id) {
-                        let sent = last_send_drain.load(Ordering::Relaxed);
-                        if sent >= 0 {
-                            let now = drain_run_started.elapsed().as_micros() as i64;
-                            let total_us = (now - sent).max(0) as u64;
-                            let drain_us = (now - arrival_us).max(0) as u64;
-                            // Wire portion: T2 (server stamp, UNIX seconds
-                            // f64) − T1 (driver's send moment in UNIX
-                            // micros). Endpoints chrony-synced to ~1ms on
-                            // AWS; clock-skew bias is folded here.
-                            // `server_ts <= 0.0` means the server didn't
-                            // stamp this frame (older image), skip wire
-                            // sample.
-                            let wire_lat = if cached.server_ts > 0.0 {
-                                let sent_unix = last_send_unix_drain.load(Ordering::Relaxed);
-                                if sent_unix > 0 {
-                                    let server_us = (cached.server_ts * 1_000_000.0) as i64;
-                                    let wire_us = (server_us - sent_unix).max(0) as u64;
-                                    Some(Duration::from_micros(wire_us))
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            };
-                            latency_metrics.record_ok_decomposed(
-                                Duration::from_micros(total_us),
-                                wire_lat,
-                                Duration::from_micros(drain_us),
-                            );
+                    if let Some(&echoed_seq) = cached.client_seqs.get(&my_id) {
+                        if echoed_seq > 0 {
+                            let mut ft = flight_drain.lock().await;
+                            if let Some(sent_at) = ft.remove(&echoed_seq) {
+                                let rtt = sent_at.elapsed();
+                                latency_metrics.record_ok_decomposed(
+                                    rtt,
+                                    None,
+                                    Duration::ZERO,
+                                );
+                                *ft = ft.split_off(&(echoed_seq + 1));
+                            }
                         }
                     }
                 }
@@ -326,8 +292,7 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
             );
         }
 
-        // Send movement — binary FlatBuffer frame for fairness with SpacetimeDB's
-        // BSATN. See brainy-bots/arcane#28 for motivation.
+        next_seq += 1;
         let msg = encode_player_state(
             &player.id,
             player.x,
@@ -337,17 +302,15 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
             player.vy,
             player.vz,
             &user_data_buf,
+            next_seq,
         );
         match sink.send(Message::Binary(msg)).await {
             Ok(_) => {
-                // Count the successful enqueue; latency is recorded by the
-                // drain task when it sees the cluster echo this write back.
                 metrics.record_ok_count();
-                last_send_micros.store(run_started.elapsed().as_micros() as i64, Ordering::Relaxed);
-                // UNIX wall-clock copy of the same moment for the wire
-                // (T2 - T1) portion of the latency decomposition.
-                if let Ok(d) = SystemTime::now().duration_since(UNIX_EPOCH) {
-                    last_send_unix_us.store(d.as_micros() as i64, Ordering::Relaxed);
+                let mut ft = flight_table.lock().await;
+                ft.insert(next_seq, std::time::Instant::now());
+                if ft.len() > 1024 {
+                    ft.pop_first();
                 }
             }
             Err(e) => {
@@ -369,15 +332,7 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
                 let action_msg = encode_game_action(&player.id, action_type, payload.as_bytes());
                 match sink.send(Message::Binary(action_msg)).await {
                     Ok(_) => {
-                        // Same pattern as movement: count the enqueue; the
-                        // next echo carrying our entity provides the latency
-                        // sample for the combined write stream.
                         action_metrics.record_ok_count();
-                        last_send_micros
-                            .store(run_started.elapsed().as_micros() as i64, Ordering::Relaxed);
-                        if let Ok(d) = SystemTime::now().duration_since(UNIX_EPOCH) {
-                            last_send_unix_us.store(d.as_micros() as i64, Ordering::Relaxed);
-                        }
                     }
                     Err(e) => {
                         action_metrics.record_err();

@@ -108,7 +108,6 @@ dependencies = [
 [[package]]
 name = "arcane-wire"
 version = "0.1.0"
-source = "git+https://github.com/brainy-bots/arcane.git?branch=epic%2F166-flatbuffers-wire-format#3d02dd32975f49f080116827488b1b3c7cf78bf4"
 dependencies = [
  "crc32fast",
  "flatbuffers",
@@ -2458,7 +2457,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

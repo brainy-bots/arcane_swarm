@@ -45,7 +45,7 @@ use uuid::Uuid;
 /// covers seconds of broadcasts across all clusters.
 pub struct CachedDelta {
     pub entity_ids: HashSet<Uuid>,
-    pub server_ts: f64,
+    pub client_seqs: HashMap<Uuid, u64>,
 }
 
 /// Bounded byte-keyed cache of decoded broadcast deltas.
