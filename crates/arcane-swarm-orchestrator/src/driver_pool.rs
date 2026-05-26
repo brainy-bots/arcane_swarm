@@ -1,4 +1,4 @@
-use crate::protocol::DriverId;
+use crate::protocol::{DriverId, DriverMetricsReport};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,6 +18,7 @@ pub struct DriverEntry {
     pub state: DriverState,
     pub last_heartbeat: Instant,
     pub capabilities: Value,
+    pub latest_metrics: Option<DriverMetricsReport>,
 }
 
 pub struct DriverPool {
@@ -59,6 +60,7 @@ impl DriverPool {
             state: DriverState::Active,
             last_heartbeat: Instant::now(),
             capabilities,
+            latest_metrics: None,
         };
 
         drivers.insert(driver_id, entry);
@@ -74,6 +76,15 @@ impl DriverPool {
 
         entry.last_heartbeat = Instant::now();
         entry.state = DriverState::Active;
+        Ok(())
+    }
+
+    pub async fn update_metrics(&self, report: DriverMetricsReport) -> Result<(), String> {
+        let mut drivers = self.drivers.write().await;
+        let entry = drivers
+            .get_mut(&report.driver_id)
+            .ok_or_else(|| format!("Driver {} not found", report.driver_id))?;
+        entry.latest_metrics = Some(report);
         Ok(())
     }
 

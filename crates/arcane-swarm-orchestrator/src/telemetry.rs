@@ -12,7 +12,7 @@
 
 use crate::command_dispatcher::{CommandDispatcher, CommandLogEntry, DriverChannel};
 use crate::driver_pool::{DriverPool, DriverState};
-use crate::protocol::{DriverId, OrchestratorCommand};
+use crate::protocol::{DriverErrorBreakdown, DriverId, OrchestratorCommand};
 use crate::stats_collector::{ClusterEndpoint, ClusterStats, StatsCollector};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,6 +32,9 @@ pub struct TelemetrySnapshot {
     /// `recent_command_window` entries by the source.
     pub recent_commands: Vec<CommandWireEntry>,
     pub clusters: HashMap<String, ClusterWireStats>,
+    /// Per-driver cumulative metrics (latest report from each driver).
+    #[serde(default)]
+    pub driver_metrics: HashMap<String, DriverMetricsWire>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -59,6 +62,20 @@ pub struct ClusterWireStats {
     pub last_tick_us: u64,
     pub broadcast_lagged_events: u64,
     pub entities_current: u64,
+}
+
+/// Per-driver metrics as they appear in the telemetry snapshot.
+/// Cumulative totals since driver start.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DriverMetricsWire {
+    pub ok: u64,
+    pub err: u64,
+    pub latency_sum_us: u64,
+    pub latency_samples: u64,
+    pub max_latency_us: u64,
+    pub bytes: u64,
+    #[serde(default)]
+    pub errors: DriverErrorBreakdown,
 }
 
 /// The telemetry source.
@@ -146,11 +163,35 @@ impl<C: DriverChannel + 'static, E: ClusterEndpoint + 'static> TelemetrySource<C
             .map(|(url, stats)| (url, wire_cluster(stats)))
             .collect();
 
+        let driver_metrics: HashMap<String, DriverMetricsWire> = self
+            .pool
+            .snapshot()
+            .await
+            .into_iter()
+            .filter_map(|entry| {
+                entry.latest_metrics.map(|m| {
+                    (
+                        entry.id.to_string(),
+                        DriverMetricsWire {
+                            ok: m.ok,
+                            err: m.err,
+                            latency_sum_us: m.latency_sum_us,
+                            latency_samples: m.latency_samples,
+                            max_latency_us: m.max_latency_us,
+                            bytes: m.bytes,
+                            errors: m.errors,
+                        },
+                    )
+                })
+            })
+            .collect();
+
         let snapshot = TelemetrySnapshot {
             snapshot_at_unix_ms,
             fleet,
             recent_commands,
             clusters,
+            driver_metrics,
         };
 
         // Drop send-error: it just means no live subscribers.

@@ -87,6 +87,10 @@ pub(crate) async fn handle_message(
         DriverMessage::CommandAck(_) => OrchestratorResponse::Error(ErrorResponse {
             message: "CommandAck handled at the connection layer".to_string(),
         }),
+        DriverMessage::MetricsReport(report) => match pool.update_metrics(report).await {
+            Ok(_) => OrchestratorResponse::Ack(AckResponse { driver_id: None }),
+            Err(err) => OrchestratorResponse::Error(ErrorResponse { message: err }),
+        },
     }
 }
 
@@ -199,6 +203,13 @@ pub async fn handle_connection(
                 if let Some(tx) = map.remove(&ack.command_seq) {
                     let _ = tx.send(ack);
                 }
+            }
+            Ok(DriverMessage::MetricsReport(report)) => {
+                let response = match pool.update_metrics(report).await {
+                    Ok(_) => OrchestratorResponse::Ack(AckResponse { driver_id: None }),
+                    Err(err) => OrchestratorResponse::Error(ErrorResponse { message: err }),
+                };
+                let _ = resp_tx.send(response).await;
             }
             Err(e) => {
                 let _ = resp_tx

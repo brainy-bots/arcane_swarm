@@ -180,7 +180,11 @@ impl BackendRuntime for ArcaneRuntime {
     }
 }
 
-async fn run_control_mode(cfg: Config, tick_interval: Duration) {
+async fn run_control_mode(
+    cfg: Config,
+    tick_interval: Duration,
+    external_metrics: Option<Arc<Metrics>>,
+) {
     let run_started = std::time::Instant::now();
     let stdb_base = cfg.spacetimedb_uri.trim_end_matches('/').to_string();
     // SDK requires a ws:// or wss:// URI rather than http://.
@@ -188,7 +192,7 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
         .replacen("https://", "wss://", 1)
         .replacen("http://", "ws://", 1);
 
-    let metrics = Arc::new(Metrics::new());
+    let metrics = external_metrics.unwrap_or_else(|| Arc::new(Metrics::new()));
     let action_metrics = Arc::new(Metrics::new());
     let read_metrics = Arc::new(Metrics::new());
 
@@ -569,7 +573,10 @@ async fn run_control_mode(cfg: Config, tick_interval: Duration) {
 fn raise_fd_limit() {
     const MIN_SOFT: u64 = 16_384;
     unsafe {
-        let mut rlim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) != 0 {
             eprintln!("WARNING: getrlimit(RLIMIT_NOFILE) failed");
             return;
@@ -647,9 +654,14 @@ async fn main() {
         // initial cfg.players up before any orchestrator command lands.
         cfg_for_control.players = 0;
 
+        // Pre-create metrics so the WS bridge can report cumulative totals
+        // to the orchestrator while the control loop uses the same counters.
+        let shared_metrics = Arc::new(Metrics::new());
+
         let cfg_for_bridge = cfg.clone();
         let state =
-            orchestrated_mode::OrchestratedState::new(cfg.players, cfg.inter_spawn_delay_ms);
+            orchestrated_mode::OrchestratedState::new(cfg.players, cfg.inter_spawn_delay_ms)
+                .with_metrics(shared_metrics.clone());
         let bridge_state = state.clone();
         let bridge = tokio::spawn(async move {
             if let Err(e) =
@@ -660,13 +672,13 @@ async fn main() {
             }
         });
 
-        run_control_mode(cfg_for_control, tick_interval).await;
+        run_control_mode(cfg_for_control, tick_interval, Some(shared_metrics)).await;
         let _ = bridge.await;
         return;
     }
 
     if cfg.run_forever || cfg.control_port > 0 {
-        run_control_mode(cfg, tick_interval).await;
+        run_control_mode(cfg, tick_interval, None).await;
         return;
     }
 

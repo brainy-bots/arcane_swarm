@@ -146,7 +146,10 @@ fn parse_args() -> Args {
 fn raise_fd_limit() {
     const MIN_SOFT: u64 = 16_384;
     unsafe {
-        let mut rlim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) != 0 {
             eprintln!("WARNING: getrlimit(RLIMIT_NOFILE) failed");
             return;
