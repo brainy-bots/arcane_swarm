@@ -229,11 +229,7 @@ pub(crate) async fn player_loop_arcane(ctx: ArcanePlayerLoop) {
                             let mut ft = flight_drain.lock().await;
                             if let Some(sent_at) = ft.remove(&echoed_seq) {
                                 let rtt = sent_at.elapsed();
-                                latency_metrics.record_ok_decomposed(
-                                    rtt,
-                                    None,
-                                    Duration::ZERO,
-                                );
+                                latency_metrics.record_ok_decomposed(rtt, None, Duration::ZERO);
                                 *ft = ft.split_off(&(echoed_seq + 1));
                             }
                         }
