@@ -206,9 +206,9 @@ mod tests {
             );
         }
         // First entry should have been evicted.
-        assert!(cache.lookup(&vec![0u8; 16]).is_none());
-        assert!(cache.lookup(&vec![1u8; 16]).is_some());
-        assert!(cache.lookup(&vec![2u8; 16]).is_some());
+        assert!(cache.lookup(&[0u8; 16]).is_none());
+        assert!(cache.lookup(&[1u8; 16]).is_some());
+        assert!(cache.lookup(&[2u8; 16]).is_some());
     }
 
     #[test]
