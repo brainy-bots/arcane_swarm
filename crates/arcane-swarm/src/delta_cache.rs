@@ -32,6 +32,7 @@
 //! Today's full-mesh wire makes it maximally effective.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -45,32 +46,26 @@ use uuid::Uuid;
 /// covers seconds of broadcasts across all clusters.
 pub struct CachedDelta {
     pub entity_ids: HashSet<Uuid>,
-    pub server_ts: f64,
+    pub client_seqs: HashMap<Uuid, u64>,
 }
 
-/// Bounded byte-keyed cache of decoded broadcast deltas.
+/// Bounded hash-keyed cache of decoded broadcast deltas.
 ///
-/// The key is the first 32 bytes of the postcard-encoded frame. Those bytes
-/// always include the postcard variant discriminator (1B) + source_cluster_id
-/// (16B) + the start of seq+tick varints, which is enough to uniquely
-/// identify a broadcast in practice — broadcasts from different
-/// (cluster, tick) pairs differ in at least one of those bytes, and bytes
-/// from the *same* broadcast sent to multiple players are bit-for-bit
-/// identical (the cluster encodes once and reuses the bytes).
+/// The key is a SipHash of the full frame. FlatBuffer field layout puts
+/// tick/seq/timestamp past byte 32, so a prefix key would collide across
+/// ticks from the same cluster. Full-frame hashing is still orders of
+/// magnitude cheaper than a FlatBuffer decode.
 ///
-/// Eviction is simple FIFO. Order of insertion doesn't perfectly match
-/// recency, but recent broadcasts dominate lookups so a young entry rarely
-/// gets evicted before its lookups settle. With `max_entries` sized for a
-/// few seconds of broadcasts, hit rate stays near-100% even with sloppy
-/// eviction.
+/// Eviction is simple FIFO. Recent broadcasts dominate lookups so a young
+/// entry rarely gets evicted before its lookups settle.
 pub struct DeltaCache {
     inner: Mutex<DeltaCacheInner>,
     max_entries: usize,
 }
 
 struct DeltaCacheInner {
-    map: HashMap<[u8; 32], Arc<CachedDelta>>,
-    order: VecDeque<[u8; 32]>,
+    map: HashMap<u64, Arc<CachedDelta>>,
+    order: VecDeque<u64>,
     hits: u64,
     misses: u64,
 }
@@ -88,14 +83,10 @@ impl DeltaCache {
         }
     }
 
-    /// Build the cache key from the first 32 bytes of a frame. Pads with
-    /// zeros if the frame is shorter (shouldn't happen for real broadcasts;
-    /// defensive only).
-    fn key_for(bytes: &[u8]) -> [u8; 32] {
-        let mut key = [0u8; 32];
-        let n = bytes.len().min(32);
-        key[..n].copy_from_slice(&bytes[..n]);
-        key
+    fn key_for(bytes: &[u8]) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Look up the cached decode for a frame. Returns `Some` on hit, `None`
@@ -119,8 +110,7 @@ impl DeltaCache {
         }
     }
 
-    /// Insert a fresh decode result keyed by the same first-32-byte slice
-    /// `lookup` would compute. If multiple drain tasks raced and each
+    /// Insert a fresh decode result. If multiple drain tasks raced and each
     /// decoded redundantly before the first insert landed, the duplicate
     /// inserts are harmless — they overwrite with equivalent data.
     pub fn insert(&self, bytes: &[u8], entry: Arc<CachedDelta>) {
@@ -167,5 +157,79 @@ impl Default for DeltaCache {
         // Sized for ~5s of broadcasts at 4 clusters × 20 Hz = 400 entries,
         // with headroom. Memory bound: 1000 × 23 KB ≈ 23 MB worst case.
         Self::new(1000)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn distinct_frames_get_distinct_keys() {
+        let mut frame_a = vec![0u8; 80];
+        let mut frame_b = vec![0u8; 80];
+        // Identical prefix (simulates FlatBuffer vtable/offset region),
+        // differ only in later bytes (simulates seq/tick/timestamp fields).
+        frame_a[40] = 1;
+        frame_b[40] = 2;
+        assert_ne!(
+            DeltaCache::key_for(&frame_a),
+            DeltaCache::key_for(&frame_b),
+            "frames differing only past byte 32 must produce different cache keys"
+        );
+    }
+
+    #[test]
+    fn lookup_returns_inserted_entry() {
+        let cache = DeltaCache::new(10);
+        let frame = b"test-frame-bytes";
+        let entry = Arc::new(CachedDelta {
+            entity_ids: HashSet::new(),
+            client_seqs: HashMap::new(),
+        });
+        assert!(cache.lookup(frame).is_none());
+        cache.insert(frame, entry.clone());
+        assert!(cache.lookup(frame).is_some());
+    }
+
+    #[test]
+    fn eviction_respects_capacity() {
+        let cache = DeltaCache::new(2);
+        for i in 0u8..3 {
+            let frame = vec![i; 16];
+            cache.insert(
+                &frame,
+                Arc::new(CachedDelta {
+                    entity_ids: HashSet::new(),
+                    client_seqs: HashMap::new(),
+                }),
+            );
+        }
+        // First entry should have been evicted.
+        assert!(cache.lookup(&[0u8; 16]).is_none());
+        assert!(cache.lookup(&[1u8; 16]).is_some());
+        assert!(cache.lookup(&[2u8; 16]).is_some());
+    }
+
+    #[test]
+    fn hit_miss_counters_track_correctly() {
+        let cache = DeltaCache::new(10);
+        let frame = b"counter-test";
+        cache.insert(
+            frame,
+            Arc::new(CachedDelta {
+                entity_ids: HashSet::new(),
+                client_seqs: HashMap::new(),
+            }),
+        );
+        cache.lookup(frame); // hit
+        cache.lookup(frame); // hit
+        cache.lookup(b"missing"); // miss
+        let (hits, misses) = cache.snapshot_and_reset_counters();
+        assert_eq!(hits, 2);
+        assert_eq!(misses, 1);
+        let (h2, m2) = cache.snapshot_and_reset_counters();
+        assert_eq!(h2, 0);
+        assert_eq!(m2, 0);
     }
 }

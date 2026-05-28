@@ -6,12 +6,14 @@
 
 ## Why this exists
 
-Today's benchmark architecture grew organically:
+The benchmark harness grew organically (and still contains legacy scripts kept for emergencies):
 
-- A PowerShell harness running on the operator's laptop drives the run.
-- The harness fans out SSM `RunCommand` calls in parallel to N driver EC2 instances.
+- A PowerShell harness running on the operator's laptop drives *some* paths.
+- **Historical / internal-only path:** the harness fans out SSM `RunCommand` calls in parallel to N driver EC2 instances.
 - Each driver runs `arcane-swarm` in Docker; it executes a tier ramp and writes per-tier `FINAL` lines to stderr.
-- The harness pulls per-driver stderr from S3 *after* all drivers exit; aggregates; declares a winner.
+- In that historical path, the harness pulls per-driver stderr from S3 *after* all drivers exit; aggregates; declares a winner.
+
+**Supported public reproduction today:** start the fleet + orchestrator, then run local `benchmark-controller` against the orchestrator HTTP API (`Run-Benchmark-Aws-Controller.ps1`), which renders the real-time terminal dashboard by subscribing to orchestrator SSE. This design doc treats that controller/orchestrator split as the direction of travel even where legacy harness pieces still exist in-repo.
 
 This works, but it leaves three structural problems on the table that get worse as the benchmark suite expands:
 
@@ -189,7 +191,7 @@ For each component PR, the structure is:
 - **Mid-run dynamic driver scale-up.** Fleet is fixed at run start; scale-up requires its own design.
 - **Multi-region orchestration.** Single-region only; multi-region requires its own design.
 - **Driver provisioning.** Stays Terraform.
-- **Replacement of the existing PowerShell harness for non-orchestrated paths.** Standalone driver mode keeps the existing path alive during the controller rollout.
+- **Replacement of the legacy PowerShell harness for non-orchestrated paths.** Standalone driver mode keeps an internal-only harness alive during the controller rollout (not advertised as the public reproduction path).
 - **Authentication beyond VPC scoping.** Operator-laptop-to-orchestrator is plain HTTPS over a known instance ID; security group keeps it scoped to the operator's CIDR. Stronger auth (mTLS / JWT) is added when the deployment requires it.
 
 ## Delivery sequence
@@ -198,7 +200,7 @@ For each component PR, the structure is:
 2. **Component PRs**: command dispatch (C2) → stats collector (C3) → telemetry SSE (C5) → telemetry archive (C6). Each unignores its own tests; each is one agent task.
 3. **Driver protocol extension PR.** Adds `--orchestrator-url` and orchestrated-mode task to existing `arcane-swarm`.
 4. **Benchmark controller** (new crate in `arcane-scaling-benchmarks`): owns phase logic, drives the orchestrator. Tracked as a separate epic in that repo.
-5. **PowerShell harness shrink.** Existing `Run-Benchmark-Aws.ps1` becomes ~50 lines that reads Terraform output, launches the controller, launches `orchestrator-cli` for live view.
+5. **Operator launcher.** `Run-Benchmark-Aws-Controller.ps1` is the supported entrypoint: read Terraform `benchmark_state`, start the AWS-side containers, then run local `benchmark-controller` against the orchestrator HTTP API (terminal dashboard via controller SSE subscription).
 6. **Re-run the headline benchmark** end-to-end via controller → orchestrator → drivers; validate parity with prior baseline within 1%.
 
 ## Open decisions
@@ -216,4 +218,4 @@ The orchestrator is done when all six of these pass:
 3. Per-phase validity gate **in the benchmark controller** aborts a synthetic-failure run within 15s of breach.
 4. All acceptance tests across orchestrator components pass in CI.
 5. PowerShell harness shrunk to operator-cli launcher.
-6. README's "Reproduce in 10 minutes" still works end-to-end (now via controller → orchestrator instead of the old harness).
+6. The benchmark repo README's public reproduction path works end-to-end (controller → orchestrator → drivers).

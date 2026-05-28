@@ -14,10 +14,12 @@
 //!
 //! Standalone mode (no `--orchestrator-url`) is unchanged.
 
+use crate::metrics::Metrics;
 use crate::{Backend, Config};
 use arcane_swarm_orchestrator::protocol::{
-    CommandAck, CommandEnvelope, DeregisterRequest, DriverMessage, HeartbeatRequest,
-    OrchestratorCommand, OrchestratorResponse, RegisterRequest,
+    CommandAck, CommandEnvelope, DeregisterRequest, DriverErrorBreakdown, DriverMessage,
+    DriverMetricsReport, HeartbeatRequest, OrchestratorCommand, OrchestratorResponse,
+    RegisterRequest,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -36,6 +38,7 @@ pub struct OrchestratedState {
     pub target_players: Arc<AtomicU32>,
     pub spawn_delay_ms: Arc<AtomicU32>,
     pub stop: Arc<AtomicBool>,
+    pub metrics: Option<Arc<Metrics>>,
 }
 
 impl OrchestratedState {
@@ -44,7 +47,13 @@ impl OrchestratedState {
             target_players: Arc::new(AtomicU32::new(initial_players)),
             spawn_delay_ms: Arc::new(AtomicU32::new(initial_spawn_delay_ms)),
             stop: Arc::new(AtomicBool::new(false)),
+            metrics: None,
         }
+    }
+
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 }
 
@@ -152,10 +161,11 @@ pub async fn run_ws_to_tcp_bridge(
         .write_all(format!("SET_PLAYERS {}\n", cfg.players).as_bytes())
         .await;
 
-    // Heartbeat task — independent of the read loop so missed heartbeats
-    // are determined by wall-clock, not message arrival rate.
-    let (hb_tx, mut hb_rx) = tokio::sync::mpsc::channel::<DriverMessage>(8);
+    // Heartbeat + metrics reporting task — independent of the read loop so
+    // missed heartbeats are determined by wall-clock, not message arrival rate.
+    let (hb_tx, mut hb_rx) = tokio::sync::mpsc::channel::<DriverMessage>(16);
     let hb_state_stop = state.stop.clone();
+    let hb_metrics = state.metrics.clone();
     tokio::spawn(async move {
         let mut ticker = time::interval(Duration::from_secs(5));
         loop {
@@ -169,6 +179,26 @@ pub async fn run_ws_to_tcp_bridge(
                 .is_err()
             {
                 return;
+            }
+            if let Some(ref m) = hb_metrics {
+                let cum = m.cumulative();
+                let report = DriverMetricsReport {
+                    driver_id,
+                    ok: cum.ok,
+                    err: cum.err,
+                    latency_sum_us: cum.latency_sum_us,
+                    latency_samples: cum.latency_samples,
+                    max_latency_us: cum.max_latency_us,
+                    bytes: cum.bytes,
+                    errors: DriverErrorBreakdown {
+                        timeout: cum.errors.timeout,
+                        not_delivered: cum.errors.not_delivered,
+                        http_status: cum.errors.http_status,
+                        transport: cum.errors.transport,
+                        connection_drop: cum.errors.connection_drop,
+                    },
+                };
+                let _ = hb_tx.send(DriverMessage::MetricsReport(report)).await;
             }
         }
     });

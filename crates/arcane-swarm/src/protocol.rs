@@ -1,6 +1,6 @@
 //! Wire-format helpers shared by backends (e.g. Arcane WebSocket payloads).
 //!
-//! The Arcane wire protocol uses postcard-encoded binary frames from
+//! The Arcane wire protocol uses FlatBuffer-encoded binary frames from
 //! [`arcane_wire`]. This module exposes small helpers that build the
 //! binary frame bytes from the values a backend loop already has on hand,
 //! so backend code doesn't need to know about the wire schema.
@@ -15,7 +15,7 @@ use arcane_wire::{
 /// Spatial query radius (server units) for SpacetimeDB read simulation.
 pub const VISIBILITY_RADIUS: f64 = 1500.0;
 
-/// Encode one `PLAYER_STATE` frame as postcard bytes for the Arcane cluster
+/// Encode one `PLAYER_STATE` frame as FlatBuffer bytes for the Arcane cluster
 /// WebSocket. Returned bytes are ready to send as `Message::Binary`.
 ///
 /// `user_data` is opaque per-entity payload that flows through the cluster's
@@ -34,22 +34,16 @@ pub fn encode_player_state(
     vy: f64,
     vz: f64,
     user_data: &[u8],
+    client_seq: u64,
 ) -> Vec<u8> {
-    // Quantize at the wire boundary: continuous f64 from the simulated
-    // player tick becomes i16 on the wire (~3-9 B per Vec3 vs 24 B). See
-    // arcane_wire::Vec3Q for the scale + range tradeoff. Sub-unit precision
-    // is lost; the benchmark world's noise floor (collision_radius=50) is
-    // well above 1 unit so this is invisible to the kinematic sim.
     let frame = ClientFrame::PlayerState(PlayerStatePayload {
         entity_id: *id,
         position: Vec3Q::from_vec3(WireVec3::new(x, y, z)),
         velocity: Vec3Q::from_vec3(WireVec3::new(vx, vy, vz)),
         user_data: user_data.to_vec(),
+        client_seq,
     });
-    // encode_client returns Err only on allocator failure or serialize-bug;
-    // both are fatal rather than recoverable for a benchmark client — unwrap
-    // so any such bug fails loudly instead of silently dropping messages.
-    encode_client(&frame).expect("postcard encode of ClientFrame::PlayerState cannot fail")
+    encode_client(&frame)
 }
 
 /// Fill `buf` with approximately `len` bytes of deterministic-but-varied
@@ -123,7 +117,7 @@ pub fn fill_pseudo_user_data(buf: &mut Vec<u8>, len: usize, player_seed: u64, ti
     buf.extend_from_slice(&bytes);
 }
 
-/// Encode one `GAME_ACTION` frame as postcard bytes for the Arcane cluster
+/// Encode one `GAME_ACTION` frame as FlatBuffer bytes for the Arcane cluster
 /// WebSocket. `payload` is treated as opaque application bytes (typically
 /// the caller passes in JSON bytes).
 pub fn encode_game_action(entity_id: &uuid::Uuid, action_type: &str, payload: &[u8]) -> Vec<u8> {
@@ -132,7 +126,7 @@ pub fn encode_game_action(entity_id: &uuid::Uuid, action_type: &str, payload: &[
         action_type: action_type.to_string(),
         payload: payload.to_vec(),
     });
-    encode_client(&frame).expect("postcard encode of ClientFrame::Action cannot fail")
+    encode_client(&frame)
 }
 
 #[cfg(test)]
@@ -143,7 +137,7 @@ mod tests {
     #[test]
     fn encode_player_state_roundtrips() {
         let id = uuid::Uuid::from_u128(0x1111_2222);
-        let bytes = encode_player_state(&id, 1.25, 2.5, 3.75, 0.1, 0.0, -0.1, &[]);
+        let bytes = encode_player_state(&id, 1.25, 2.5, 3.75, 0.1, 0.0, -0.1, &[], 0);
         let decoded = decode_client(&bytes).unwrap();
         let ClientFrame::PlayerState(payload) = decoded else {
             panic!("expected PlayerState variant");
@@ -159,7 +153,7 @@ mod tests {
     fn encode_player_state_carries_user_data() {
         let id = uuid::Uuid::from_u128(7);
         let payload = vec![0xAB, 0xCD, 0xEF, 0x12, 0x34];
-        let bytes = encode_player_state(&id, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, &payload);
+        let bytes = encode_player_state(&id, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, &payload, 0);
         let decoded = decode_client(&bytes).unwrap();
         let ClientFrame::PlayerState(p) = decoded else {
             panic!("expected PlayerState variant");

@@ -100,6 +100,18 @@ pub struct MetricsSnapshot {
     pub drain_latency_samples: u64,
 }
 
+/// Cumulative (never-reset) totals readable by the orchestrator bridge.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CumulativeMetrics {
+    pub ok: u64,
+    pub err: u64,
+    pub latency_sum_us: u64,
+    pub latency_samples: u64,
+    pub max_latency_us: u64,
+    pub bytes: u64,
+    pub errors: ErrorBreakdown,
+}
+
 /// Thread-safe rolling metrics for OK/err counts and latencies (microseconds).
 pub struct Metrics {
     ok: AtomicU64,
@@ -121,6 +133,19 @@ pub struct Metrics {
     drain_latency_sum_us: AtomicU64,
     drain_latency_max_us: AtomicU64,
     drain_latency_samples: AtomicU64,
+    // Cumulative counters — never reset. Used by the orchestrator bridge
+    // to report running totals to the controller.
+    cum_ok: AtomicU64,
+    cum_err: AtomicU64,
+    cum_latency_sum_us: AtomicU64,
+    cum_latency_samples: AtomicU64,
+    cum_max_latency_us: AtomicU64,
+    cum_bytes: AtomicU64,
+    cum_err_timeout: AtomicU64,
+    cum_err_not_delivered: AtomicU64,
+    cum_err_http_status: AtomicU64,
+    cum_err_transport: AtomicU64,
+    cum_err_connection_drop: AtomicU64,
 }
 
 impl Metrics {
@@ -143,6 +168,17 @@ impl Metrics {
             drain_latency_sum_us: AtomicU64::new(0),
             drain_latency_max_us: AtomicU64::new(0),
             drain_latency_samples: AtomicU64::new(0),
+            cum_ok: AtomicU64::new(0),
+            cum_err: AtomicU64::new(0),
+            cum_latency_sum_us: AtomicU64::new(0),
+            cum_latency_samples: AtomicU64::new(0),
+            cum_max_latency_us: AtomicU64::new(0),
+            cum_bytes: AtomicU64::new(0),
+            cum_err_timeout: AtomicU64::new(0),
+            cum_err_not_delivered: AtomicU64::new(0),
+            cum_err_http_status: AtomicU64::new(0),
+            cum_err_transport: AtomicU64::new(0),
+            cum_err_connection_drop: AtomicU64::new(0),
         }
     }
 
@@ -185,6 +221,10 @@ impl Metrics {
         self.latency_sum_us.fetch_add(us, Ordering::Relaxed);
         self.latency_samples.fetch_add(1, Ordering::Relaxed);
         self.latency_max_us.fetch_max(us, Ordering::Relaxed);
+        self.cum_ok.fetch_add(1, Ordering::Relaxed);
+        self.cum_latency_sum_us.fetch_add(us, Ordering::Relaxed);
+        self.cum_latency_samples.fetch_add(1, Ordering::Relaxed);
+        self.cum_max_latency_us.fetch_max(us, Ordering::Relaxed);
     }
 
     /// Record a successful operation without contributing a latency sample.
@@ -198,11 +238,13 @@ impl Metrics {
     /// `backends_spacetimedb` in the binary crate).
     pub fn record_ok_count(&self) {
         self.ok.fetch_add(1, Ordering::Relaxed);
+        self.cum_ok.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_ok_bytes(&self, latency: Duration, bytes: u64) {
         self.record_ok(latency);
         self.bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.cum_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
     pub fn record_err(&self) {
@@ -211,21 +253,27 @@ impl Metrics {
 
     pub fn record_err_kind(&self, kind: ErrorKind) {
         self.err.fetch_add(1, Ordering::Relaxed);
+        self.cum_err.fetch_add(1, Ordering::Relaxed);
         match kind {
             ErrorKind::Timeout => {
                 self.err_timeout.fetch_add(1, Ordering::Relaxed);
+                self.cum_err_timeout.fetch_add(1, Ordering::Relaxed);
             }
             ErrorKind::NotDelivered => {
                 self.err_not_delivered.fetch_add(1, Ordering::Relaxed);
+                self.cum_err_not_delivered.fetch_add(1, Ordering::Relaxed);
             }
             ErrorKind::HttpStatus => {
                 self.err_http_status.fetch_add(1, Ordering::Relaxed);
+                self.cum_err_http_status.fetch_add(1, Ordering::Relaxed);
             }
             ErrorKind::Transport => {
                 self.err_transport.fetch_add(1, Ordering::Relaxed);
+                self.cum_err_transport.fetch_add(1, Ordering::Relaxed);
             }
             ErrorKind::ConnectionDrop => {
                 self.err_connection_drop.fetch_add(1, Ordering::Relaxed);
+                self.cum_err_connection_drop.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -234,6 +282,8 @@ impl Metrics {
     pub fn record_inbound_ok(&self, payload_bytes: u64) {
         self.ok.fetch_add(1, Ordering::Relaxed);
         self.bytes.fetch_add(payload_bytes, Ordering::Relaxed);
+        self.cum_ok.fetch_add(1, Ordering::Relaxed);
+        self.cum_bytes.fetch_add(payload_bytes, Ordering::Relaxed);
     }
 
     pub fn snapshot_and_reset(&self) -> MetricsSnapshot {
@@ -272,6 +322,26 @@ impl Metrics {
             avg_drain_latency_us: drain_sum.checked_div(drain_n).unwrap_or(0),
             max_drain_latency_us: drain_max,
             drain_latency_samples: drain_n,
+        }
+    }
+
+    /// Read cumulative (never-reset) totals. Safe to call concurrently with
+    /// `record_*` and `snapshot_and_reset` — uses its own set of atomics.
+    pub fn cumulative(&self) -> CumulativeMetrics {
+        CumulativeMetrics {
+            ok: self.cum_ok.load(Ordering::Relaxed),
+            err: self.cum_err.load(Ordering::Relaxed),
+            latency_sum_us: self.cum_latency_sum_us.load(Ordering::Relaxed),
+            latency_samples: self.cum_latency_samples.load(Ordering::Relaxed),
+            max_latency_us: self.cum_max_latency_us.load(Ordering::Relaxed),
+            bytes: self.cum_bytes.load(Ordering::Relaxed),
+            errors: ErrorBreakdown {
+                timeout: self.cum_err_timeout.load(Ordering::Relaxed),
+                not_delivered: self.cum_err_not_delivered.load(Ordering::Relaxed),
+                http_status: self.cum_err_http_status.load(Ordering::Relaxed),
+                transport: self.cum_err_transport.load(Ordering::Relaxed),
+                connection_drop: self.cum_err_connection_drop.load(Ordering::Relaxed),
+            },
         }
     }
 }

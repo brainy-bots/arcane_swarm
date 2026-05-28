@@ -15,6 +15,8 @@ pub enum DriverMessage {
     Deregister(DeregisterRequest),
     #[serde(rename = "command_ack")]
     CommandAck(CommandAck),
+    #[serde(rename = "metrics_report")]
+    MetricsReport(DriverMetricsReport),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +27,31 @@ pub struct RegisterRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatRequest {
     pub driver_id: DriverId,
+}
+
+/// Cumulative driver-side metrics. Sent periodically alongside heartbeats.
+/// Values are running totals since driver start — the consumer computes
+/// deltas between snapshots to derive per-phase or per-interval rates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriverMetricsReport {
+    pub driver_id: DriverId,
+    pub ok: u64,
+    pub err: u64,
+    pub latency_sum_us: u64,
+    pub latency_samples: u64,
+    pub max_latency_us: u64,
+    pub bytes: u64,
+    #[serde(default)]
+    pub errors: DriverErrorBreakdown,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DriverErrorBreakdown {
+    pub timeout: u64,
+    pub not_delivered: u64,
+    pub http_status: u64,
+    pub transport: u64,
+    pub connection_drop: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

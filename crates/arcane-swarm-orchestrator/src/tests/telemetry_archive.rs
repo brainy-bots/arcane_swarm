@@ -42,6 +42,7 @@ fn synth_snapshot(unix_ms: u128) -> TelemetrySnapshot {
         fleet: Vec::new(),
         recent_commands: Vec::new(),
         clusters,
+        driver_metrics: HashMap::new(),
     }
 }
 
