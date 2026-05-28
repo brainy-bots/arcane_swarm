@@ -20,9 +20,7 @@ libc = "0.2"
 # produced by `spacetime generate --lang rust --module-path <full module>`.
 spacetimedb-sdk = "2.1"
 # Shared wire schema with the cluster (arcane repo). Path resolves to the
-# arcane submodule inside the benchmarks repo — works both locally and in
-# the Docker build context.
-arcane-wire = { path = "../../../arcane/crates/arcane-wire" }
+arcane-wire = { git = "https://github.com/brainy-bots/arcane.git", branch = "main" }
 # Shared orchestrator wire schema (DriverMessage / OrchestratorResponse /
 # OrchestratorCommand / CommandAck). The orchestrator crate is the source of
 # truth for these types; the driver consumes them under --orchestrator-url.

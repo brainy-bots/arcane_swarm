@@ -108,6 +108,7 @@ dependencies = [
 [[package]]
 name = "arcane-wire"
 version = "0.1.0"
+source = "git+https://github.com/brainy-bots/arcane.git?branch=main#28fb040ff25f85603101a7c21acedbe7ea349a99"
 dependencies = [
  "crc32fast",
  "flatbuffers",
