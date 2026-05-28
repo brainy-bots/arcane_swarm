@@ -81,7 +81,7 @@ pub struct Config {
 }
 
 pub fn parse_args() -> Config {
-    let mut players: u32 = 100;
+    let mut players: u32 = 0;
     let mut max_players: u32 = 0;
     let mut tick_rate: u32 = 20;
     let mut duration_secs: u64 = 60;
@@ -229,7 +229,7 @@ pub fn parse_args() -> Config {
             "--help" | "-h" => {
                 eprintln!("arcane-swarm: headless client swarm\n");
                 eprintln!("  --backend MODE        spacetimedb | arcane (default spacetimedb)");
-                eprintln!("  --players N            number of simulated players (default 100)");
+                eprintln!("  --players N            number of simulated players (default 0)");
                 eprintln!("  --max-players N       max players for incremental mode (default = --players)");
                 eprintln!("  --tick-rate HZ         ticks per second per player (default 20)");
                 eprintln!("  --duration SECS        how long to run (default 60)");
