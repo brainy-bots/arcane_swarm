@@ -4,6 +4,7 @@
 //! every flag/env var eventually maps into [`Config`], which is consumed by binary orchestration.
 
 use crate::BurstConfig;
+use clap::Parser;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -80,225 +81,320 @@ pub struct Config {
     pub orchestrator_url: Option<String>,
 }
 
-pub fn parse_args() -> Config {
-    let mut players: u32 = 0;
-    let mut max_players: u32 = 0;
-    let mut tick_rate: u32 = 20;
-    let mut duration_secs: u64 = 60;
-    let mut mode = SwarmMode::Spread;
-    let mut csv_path: Option<String> = None;
-    let mut uri =
-        std::env::var("SPACETIMEDB_URI").unwrap_or_else(|_| "http://127.0.0.1:3000".into());
-    let mut database = std::env::var("DATABASE_NAME").unwrap_or_else(|_| "arcane".into());
-    let mut arcane_ws = std::env::var("ARCANE_WS").unwrap_or_else(|_| "ws://127.0.0.1:8080".into());
-    let mut arcane_manager: Option<String> = std::env::var("ARCANE_MANAGER").ok();
-    let mut backend = Backend::SpacetimeDb;
-    let mut actions_per_sec: f64 = 0.0;
-    let mut read_rate: f64 = 5.0;
-    let mut server_physics: bool = false;
-    let mut run_forever: bool = false;
-    let mut control_port: u16 = 0;
-    let mut burst = BurstConfig::default();
-    let mut user_data_bytes: usize = 0;
-    let mut inter_spawn_delay_ms: u32 = 0;
-    let mut max_players_per_driver: u32 = 0;
-    let mut orchestrator_url: Option<String> = std::env::var("ORCHESTRATOR_URL").ok();
+#[derive(Parser, Debug)]
+#[command(name = "arcane-swarm")]
+#[command(about = "headless client swarm", long_about = None)]
+struct Args {
+    #[arg(
+        long,
+        value_name = "MODE",
+        default_value = "spacetimedb",
+        env = "BACKEND",
+        value_parser = ["spacetimedb", "arcane"],
+        help = "spacetimedb | arcane"
+    )]
+    backend: String,
 
-    let args: Vec<String> = std::env::args().collect();
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--players" | "-n" => {
-                i += 1;
-                players = args[i].parse().unwrap_or(players);
-            }
-            "--tick-rate" | "-t" => {
-                i += 1;
-                tick_rate = args[i].parse().unwrap_or(tick_rate);
-            }
-            "--duration" | "-d" => {
-                i += 1;
-                duration_secs = args[i].parse().unwrap_or(duration_secs);
-            }
-            "--mode" | "-m" => {
-                i += 1;
-                mode = if args[i] == "clustered" {
-                    SwarmMode::Clustered
-                } else {
-                    SwarmMode::Spread
-                };
-            }
-            "--csv" => {
-                i += 1;
-                csv_path = Some(args[i].clone());
-            }
-            "--uri" => {
-                i += 1;
-                uri = args[i].clone();
-            }
-            "--database" | "--db" => {
-                i += 1;
-                database = args[i].clone();
-            }
-            "--arcane-ws" => {
-                i += 1;
-                arcane_ws = args[i].clone();
-            }
-            "--arcane-manager" => {
-                i += 1;
-                arcane_manager = Some(args[i].clone());
-            }
-            "--backend" | "-b" => {
-                i += 1;
-                backend = if args[i] == "arcane" {
-                    Backend::Arcane
-                } else {
-                    Backend::SpacetimeDb
-                };
-            }
-            "--actions-per-sec" | "--aps" => {
-                i += 1;
-                actions_per_sec = args[i].parse().unwrap_or(0.0);
-            }
-            "--read-rate" => {
-                i += 1;
-                read_rate = args[i].parse().unwrap_or(5.0);
-            }
-            "--server-physics" => {
-                server_physics = true;
-            }
-            "--max-players" => {
-                i += 1;
-                max_players = args[i].parse().unwrap_or(players);
-            }
-            "--run-forever" => {
-                run_forever = true;
-            }
-            "--control-port" => {
-                i += 1;
-                control_port = args[i].parse().unwrap_or(0);
-            }
-            "--burst-enabled" => {
-                burst.enabled = true;
-            }
-            "--burst-disabled" => {
-                burst.enabled = false;
-            }
-            "--burst-period-secs" => {
-                i += 1;
-                burst.burst_period_secs = args[i].parse().unwrap_or(burst.burst_period_secs);
-            }
-            "--burst-cohort-percent" => {
-                i += 1;
-                burst.burst_cohort_percent = args[i].parse().unwrap_or(burst.burst_cohort_percent);
-            }
-            "--burst-actions-per-player" => {
-                i += 1;
-                burst.burst_actions_per_player =
-                    args[i].parse().unwrap_or(burst.burst_actions_per_player);
-            }
-            "--burst-window-ms" => {
-                i += 1;
-                burst.burst_window_ms = args[i].parse().unwrap_or(burst.burst_window_ms);
-            }
-            "--zone-event-period-secs" => {
-                i += 1;
-                burst.zone_event_period_secs =
-                    args[i].parse().unwrap_or(burst.zone_event_period_secs);
-            }
-            "--zone-event-window-ms" => {
-                i += 1;
-                burst.zone_event_window_ms = args[i].parse().unwrap_or(burst.zone_event_window_ms);
-            }
-            "--user-data-bytes" => {
-                i += 1;
-                user_data_bytes = args[i].parse().unwrap_or(0);
-            }
-            "--inter-spawn-delay-ms" => {
-                i += 1;
-                inter_spawn_delay_ms = args[i].parse().unwrap_or(0);
-            }
-            "--max-players-per-driver" => {
-                i += 1;
-                max_players_per_driver = args[i].parse().unwrap_or(0);
-            }
-            "--orchestrator-url" => {
-                i += 1;
-                orchestrator_url = Some(args[i].clone());
-            }
-            "--help" | "-h" => {
-                eprintln!("arcane-swarm: headless client swarm\n");
-                eprintln!("  --backend MODE        spacetimedb | arcane (default spacetimedb)");
-                eprintln!("  --players N            number of simulated players (default 0)");
-                eprintln!("  --max-players N       max players for incremental mode (default = --players)");
-                eprintln!("  --tick-rate HZ         ticks per second per player (default 20)");
-                eprintln!("  --duration SECS        how long to run (default 60)");
-                eprintln!("  --mode MODE            spread | clustered (default spread)");
-                eprintln!(
-                    "  --actions-per-sec N    persistent actions per player per second (default 0)"
-                );
-                eprintln!(
-                    "  --read-rate HZ         world-state reads per player per second (default 5)"
-                );
-                eprintln!("  --server-physics      for spacetimedb backend: use update_player_input for movement");
-                eprintln!("  --run-forever          keep running until QUIT");
-                eprintln!("  --control-port PORT   enable TCP control server at 127.0.0.1:PORT");
-                eprintln!("  --burst-enabled      enable deterministic burst profile (default on)");
-                eprintln!("  --burst-disabled     disable deterministic burst profile");
-                eprintln!("  --burst-period-secs N    seconds between bursts (default 30)");
-                eprintln!(
-                    "  --burst-cohort-percent N percentage of players in each burst (default 20)"
-                );
-                eprintln!("  --burst-actions-per-player N extra actions for selected players during burst (default 10)");
-                eprintln!(
-                    "  --burst-window-ms N     burst window length in milliseconds (default 500)"
-                );
-                eprintln!("  --zone-event-period-secs N seconds between all-player convergence events (default 30)");
-                eprintln!("  --zone-event-window-ms N zone event steering window in milliseconds (default 500)");
-                eprintln!("  --user-data-bytes N    bytes per PLAYER_STATE.user_data payload (default 0; Arcane backend only)");
-                eprintln!("  --inter-spawn-delay-ms N  ms between consecutive player spawns (default 0; multi-driver join-rate pacing)");
-                eprintln!("  --max-players-per-driver N  hard safety cap on simultaneously-active players (default 0 = no cap; multi-driver runs set this conservatively)");
-                eprintln!("  --orchestrator-url URL  connect to swarm orchestrator over WS and run in orchestrated mode (default unset = standalone)");
-                eprintln!("  --csv PATH             write metrics CSV to this file");
-                eprintln!(
-                    "  --uri URL              SpacetimeDB URI (default http://127.0.0.1:3000)"
-                );
-                eprintln!("  --database NAME        database name (default arcane)");
-                eprintln!("  --arcane-ws URL        Arcane cluster WebSocket (default ws://127.0.0.1:8080)");
-                eprintln!("  --arcane-manager URL   Use manager /join for cluster assignment (round-robin)");
-                std::process::exit(0);
-            }
-            _ => {}
-        }
-        i += 1;
-    }
+    #[arg(
+        long,
+        short = 'n',
+        value_name = "N",
+        default_value = "0",
+        help = "number of simulated players"
+    )]
+    players: u32,
+
+    #[arg(
+        long,
+        value_name = "N",
+        default_value = "0",
+        help = "max players for incremental mode (default = --players)"
+    )]
+    max_players: u32,
+
+    #[arg(
+        long,
+        short = 't',
+        value_name = "HZ",
+        default_value = "20",
+        help = "ticks per second per player"
+    )]
+    tick_rate: u32,
+
+    #[arg(
+        long,
+        short = 'd',
+        value_name = "SECS",
+        default_value = "60",
+        help = "how long to run"
+    )]
+    duration: u64,
+
+    #[arg(
+        long,
+        short = 'm',
+        value_name = "MODE",
+        default_value = "spread",
+        value_parser = ["spread", "clustered"],
+        help = "spread | clustered"
+    )]
+    mode: String,
+
+    #[arg(long, value_name = "PATH", help = "write metrics CSV to this file")]
+    csv: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "URL",
+        env = "SPACETIMEDB_URI",
+        default_value = "http://127.0.0.1:3000",
+        help = "SpacetimeDB URI"
+    )]
+    uri: String,
+
+    #[arg(
+        long,
+        alias = "db",
+        value_name = "NAME",
+        env = "DATABASE_NAME",
+        default_value = "arcane",
+        help = "database name"
+    )]
+    database: String,
+
+    #[arg(
+        long,
+        value_name = "URL",
+        env = "ARCANE_WS",
+        default_value = "ws://127.0.0.1:8080",
+        help = "Arcane cluster WebSocket"
+    )]
+    arcane_ws: String,
+
+    #[arg(
+        long,
+        value_name = "URL",
+        env = "ARCANE_MANAGER",
+        help = "Use manager /join for cluster assignment (round-robin)"
+    )]
+    arcane_manager: Option<String>,
+
+    #[arg(
+        long,
+        alias = "aps",
+        value_name = "N",
+        help = "persistent actions per player per second"
+    )]
+    actions_per_sec: Option<f64>,
+
+    #[arg(
+        long,
+        value_name = "HZ",
+        help = "world-state reads per player per second"
+    )]
+    read_rate: Option<f64>,
+
+    #[arg(
+        long,
+        help = "for spacetimedb backend: use update_player_input for movement"
+    )]
+    server_physics: bool,
+
+    #[arg(long, help = "keep running until QUIT")]
+    run_forever: bool,
+
+    #[arg(
+        long,
+        value_name = "PORT",
+        help = "enable TCP control server at 127.0.0.1:PORT"
+    )]
+    control_port: Option<u16>,
+
+    #[arg(long, help = "enable deterministic burst profile")]
+    burst_enabled: bool,
+
+    #[arg(long, help = "disable deterministic burst profile")]
+    burst_disabled: bool,
+
+    #[arg(long, value_name = "N", help = "seconds between bursts")]
+    burst_period_secs: Option<u64>,
+
+    #[arg(long, value_name = "N", help = "percentage of players in each burst")]
+    burst_cohort_percent: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "extra actions for selected players during burst"
+    )]
+    burst_actions_per_player: Option<u32>,
+
+    #[arg(long, value_name = "N", help = "burst window length in milliseconds")]
+    burst_window_ms: Option<u64>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "seconds between all-player convergence events"
+    )]
+    zone_event_period_secs: Option<u64>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "zone event steering window in milliseconds"
+    )]
+    zone_event_window_ms: Option<u64>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "bytes per PLAYER_STATE.user_data payload (Arcane backend only)"
+    )]
+    user_data_bytes: Option<usize>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "ms between consecutive player spawns (multi-driver join-rate pacing)"
+    )]
+    inter_spawn_delay_ms: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "hard safety cap on simultaneously-active players (multi-driver runs)"
+    )]
+    max_players_per_driver: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "URL",
+        env = "ORCHESTRATOR_URL",
+        help = "connect to swarm orchestrator over WS and run in orchestrated mode"
+    )]
+    orchestrator_url: Option<String>,
+}
+
+pub fn parse_args() -> Config {
+    let args = Args::parse();
+
+    let backend = match args.backend.as_str() {
+        "arcane" => Backend::Arcane,
+        _ => Backend::SpacetimeDb,
+    };
+
+    let mode = match args.mode.as_str() {
+        "clustered" => SwarmMode::Clustered,
+        _ => SwarmMode::Spread,
+    };
+
+    let tick_rate = args.tick_rate.max(1);
+    let max_players = if args.max_players == 0 {
+        args.players
+    } else {
+        args.max_players
+    };
+
+    let burst = BurstConfig {
+        enabled: if args.burst_disabled {
+            false
+        } else {
+            args.burst_enabled || BurstConfig::default().enabled
+        },
+        burst_period_secs: args
+            .burst_period_secs
+            .unwrap_or(BurstConfig::default().burst_period_secs),
+        burst_cohort_percent: args
+            .burst_cohort_percent
+            .unwrap_or(BurstConfig::default().burst_cohort_percent),
+        burst_actions_per_player: args
+            .burst_actions_per_player
+            .unwrap_or(BurstConfig::default().burst_actions_per_player),
+        burst_window_ms: args
+            .burst_window_ms
+            .unwrap_or(BurstConfig::default().burst_window_ms),
+        zone_event_period_secs: args
+            .zone_event_period_secs
+            .unwrap_or(BurstConfig::default().zone_event_period_secs),
+        zone_event_window_ms: args
+            .zone_event_window_ms
+            .unwrap_or(BurstConfig::default().zone_event_window_ms),
+    };
 
     Config {
         backend,
-        spacetimedb_uri: uri,
-        database,
-        arcane_ws,
-        arcane_manager,
-        players,
-        max_players: if max_players == 0 {
-            players
-        } else {
-            max_players
-        },
-        tick_rate: tick_rate.max(1),
-        duration_secs,
+        spacetimedb_uri: args.uri,
+        database: args.database,
+        arcane_ws: args.arcane_ws,
+        arcane_manager: args.arcane_manager,
+        players: args.players,
+        max_players,
+        tick_rate,
+        duration_secs: args.duration,
         mode,
-        csv_path,
+        csv_path: args.csv,
         cluster_command: Arc::new(AtomicBool::new(mode == SwarmMode::Clustered)),
-        actions_per_sec,
-        read_rate,
-        server_physics,
-        run_forever,
-        control_port,
+        actions_per_sec: args.actions_per_sec.unwrap_or(0.0),
+        read_rate: args.read_rate.unwrap_or(5.0),
+        server_physics: args.server_physics,
+        run_forever: args.run_forever,
+        control_port: args.control_port.unwrap_or(0),
         burst,
-        user_data_bytes,
-        inter_spawn_delay_ms,
-        max_players_per_driver,
-        orchestrator_url,
+        user_data_bytes: args.user_data_bytes.unwrap_or(0),
+        inter_spawn_delay_ms: args.inter_spawn_delay_ms.unwrap_or(0),
+        max_players_per_driver: args.max_players_per_driver.unwrap_or(0),
+        orchestrator_url: args.orchestrator_url,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_backend_value_is_a_hard_error() {
+        let err = Args::try_parse_from(["arcane-swarm", "--backend", "arcnae"]);
+        assert!(
+            err.is_err(),
+            "typo'd --backend must fail loudly, not fall back"
+        );
+    }
+
+    #[test]
+    fn invalid_mode_value_is_a_hard_error() {
+        let err = Args::try_parse_from(["arcane-swarm", "--mode", "clusterd"]);
+        assert!(
+            err.is_err(),
+            "typo'd --mode must fail loudly, not fall back"
+        );
+    }
+
+    #[test]
+    fn invalid_numeric_value_is_a_hard_error() {
+        let err = Args::try_parse_from(["arcane-swarm", "--players", "abc"]);
+        assert!(err.is_err(), "non-numeric --players must fail loudly");
+    }
+
+    #[test]
+    fn aps_alias_maps_to_actions_per_sec() {
+        let args = Args::try_parse_from(["arcane-swarm", "--aps", "2.5"]).unwrap();
+        assert_eq!(args.actions_per_sec, Some(2.5));
+    }
+
+    #[test]
+    fn players_defaults_to_zero() {
+        // Ghost-entity fix (arcane_swarm#58): orchestrated drivers must start at 0.
+        let args = Args::try_parse_from(["arcane-swarm"]).unwrap();
+        assert_eq!(args.players, 0);
+    }
+
+    #[test]
+    fn valid_backend_and_mode_parse() {
+        let args =
+            Args::try_parse_from(["arcane-swarm", "--backend", "arcane", "--mode", "clustered"])
+                .unwrap();
+        assert_eq!(args.backend, "arcane");
+        assert_eq!(args.mode, "clustered");
     }
 }

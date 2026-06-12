@@ -6,6 +6,7 @@ description = "Generic headless swarm runner for Arcane-compatible workloads."
 license = "AGPL-3.0-only"
 
 [dependencies]
+clap = { version = "4.4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.21"
 futures-util = "0.3"
