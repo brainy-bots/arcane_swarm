@@ -90,6 +90,7 @@ struct Args {
         value_name = "MODE",
         default_value = "spacetimedb",
         env = "BACKEND",
+        value_parser = ["spacetimedb", "arcane"],
         help = "spacetimedb | arcane"
     )]
     backend: String,
@@ -134,6 +135,7 @@ struct Args {
         short = 'm',
         value_name = "MODE",
         default_value = "spread",
+        value_parser = ["spread", "clustered"],
         help = "spread | clustered"
     )]
     mode: String,
@@ -179,7 +181,7 @@ struct Args {
 
     #[arg(
         long,
-        short = 'b',
+        alias = "aps",
         value_name = "N",
         help = "persistent actions per player per second"
     )]
@@ -343,5 +345,56 @@ pub fn parse_args() -> Config {
         inter_spawn_delay_ms: args.inter_spawn_delay_ms.unwrap_or(0),
         max_players_per_driver: args.max_players_per_driver.unwrap_or(0),
         orchestrator_url: args.orchestrator_url,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_backend_value_is_a_hard_error() {
+        let err = Args::try_parse_from(["arcane-swarm", "--backend", "arcnae"]);
+        assert!(
+            err.is_err(),
+            "typo'd --backend must fail loudly, not fall back"
+        );
+    }
+
+    #[test]
+    fn invalid_mode_value_is_a_hard_error() {
+        let err = Args::try_parse_from(["arcane-swarm", "--mode", "clusterd"]);
+        assert!(
+            err.is_err(),
+            "typo'd --mode must fail loudly, not fall back"
+        );
+    }
+
+    #[test]
+    fn invalid_numeric_value_is_a_hard_error() {
+        let err = Args::try_parse_from(["arcane-swarm", "--players", "abc"]);
+        assert!(err.is_err(), "non-numeric --players must fail loudly");
+    }
+
+    #[test]
+    fn aps_alias_maps_to_actions_per_sec() {
+        let args = Args::try_parse_from(["arcane-swarm", "--aps", "2.5"]).unwrap();
+        assert_eq!(args.actions_per_sec, Some(2.5));
+    }
+
+    #[test]
+    fn players_defaults_to_zero() {
+        // Ghost-entity fix (arcane_swarm#58): orchestrated drivers must start at 0.
+        let args = Args::try_parse_from(["arcane-swarm"]).unwrap();
+        assert_eq!(args.players, 0);
+    }
+
+    #[test]
+    fn valid_backend_and_mode_parse() {
+        let args =
+            Args::try_parse_from(["arcane-swarm", "--backend", "arcane", "--mode", "clustered"])
+                .unwrap();
+        assert_eq!(args.backend, "arcane");
+        assert_eq!(args.mode, "clustered");
     }
 }
