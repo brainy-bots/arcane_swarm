@@ -570,6 +570,7 @@ async fn run_control_mode(
 
 // -- Main ------------------------------------------------------------------
 
+#[cfg(unix)]
 fn raise_fd_limit() {
     const MIN_SOFT: u64 = 16_384;
     unsafe {
@@ -597,6 +598,11 @@ fn raise_fd_limit() {
         }
     }
 }
+
+/// Windows has no RLIMIT_NOFILE; socket handles are limited by other means
+/// (default per-process handle ceiling is far above our player counts).
+#[cfg(not(unix))]
+fn raise_fd_limit() {}
 
 #[tokio::main]
 async fn main() {
